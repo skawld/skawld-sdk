@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   evaluateBashRules,
   matchBashRule,
+  splitCompositeCommand,
   matchPathRule,
   matchToolRule,
   type BashRule,
@@ -115,5 +116,57 @@ describe("permission bash rules", () => {
 
     expect(evaluateBashRules(rules, 'echo "safe && rm -rf dist"')).toBe("allow");
     expect(evaluateBashRules(rules, "echo 'safe | rm -rf dist'")).toBe("allow");
+  });
+
+  test("denies commands smuggled after a newline", () => {
+    const rules: BashRule[] = [
+      { kind: "bash", pattern: "git status", decision: "allow" },
+      { kind: "bash", pattern: { regex: "\\brm\\b" }, decision: "deny" },
+    ];
+
+    expect(evaluateBashRules(rules, "git status\nrm -rf /")).toBe("deny");
+    expect(evaluateBashRules(rules, "git status\r\nrm -rf /")).toBe("deny");
+  });
+
+  test("denies commands smuggled after a background &", () => {
+    const rules: BashRule[] = [
+      { kind: "bash", pattern: "git status", decision: "allow" },
+      { kind: "bash", pattern: { regex: "\\brm\\b" }, decision: "deny" },
+    ];
+
+    expect(evaluateBashRules(rules, "git status & rm -rf /")).toBe("deny");
+    expect(evaluateBashRules(rules, "git status &rm -rf /")).toBe("deny");
+  });
+
+  test("splits mixed operators into one segment per real command", () => {
+    expect(splitCompositeCommand("a\nb && c & d").map(s => s.trim()).filter(s => s !== ""))
+      .toEqual(["a", "b", "c", "d"]);
+  });
+
+  test("newline split allows when every segment is allowed", () => {
+    const rules: BashRule[] = [
+      { kind: "bash", pattern: "git status", decision: "allow" },
+      { kind: "bash", pattern: "git diff", decision: "allow" },
+    ];
+
+    expect(evaluateBashRules(rules, "git status\ngit diff")).toBe("allow");
+  });
+
+  test("does not split on quoted newlines or ampersands", () => {
+    const rules: BashRule[] = [
+      { kind: "bash", pattern: "echo", decision: "allow" },
+      { kind: "bash", pattern: { regex: "\\brm\\b" }, decision: "deny" },
+    ];
+
+    expect(evaluateBashRules(rules, 'echo "a\nrm -rf dist"')).toBe("allow");
+    expect(evaluateBashRules(rules, "echo 'x & rm -rf dist'")).toBe("allow");
+    expect(splitCompositeCommand('echo "a\nb"')).toEqual(['echo "a\nb"']);
+    expect(splitCompositeCommand("echo 'x & y'")).toEqual(["echo 'x & y'"]);
+  });
+
+  test("&& and || splitting is unchanged by single-& support", () => {
+    expect(splitCompositeCommand("a && b")).toEqual(["a ", " b"]);
+    expect(splitCompositeCommand("a || b")).toEqual(["a ", " b"]);
+    expect(splitCompositeCommand("a & b")).toEqual(["a ", " b"]);
   });
 });

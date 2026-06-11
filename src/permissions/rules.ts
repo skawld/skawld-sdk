@@ -207,5 +207,9 @@ function compositeOperatorLength(input: string, index: number): number {
   const next = input[index + 1];
   if ((char === "&" && next === "&") || (char === "|" && next === "|")) return 2;
   if (char === ";" || char === "|") return 1;
+  // sh -c also treats unquoted newlines and a standalone background `&` as
+  // command separators; missing them would let a later command ride through
+  // on the first segment's allow decision.
+  if (char === "\n" || char === "\r" || char === "&") return 1;
   return 0;
 }
