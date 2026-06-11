@@ -1,10 +1,24 @@
 import { describe, expect, it, mock } from "bun:test";
+import path from "node:path";
 import { Agent } from "./agent.js";
 import { getAgentInternals } from "./agent.js";
 import { ConfigError } from "./errors.js";
 import { InMemorySessionStore } from "../sessions/memory.js";
 import { SKAWLD_VERSION } from "./version.js";
 import type { BaseProvider } from "../providers/base.js";
+import type { PermissionRule } from "../permissions/rules.js";
+
+const SKILLS_FIXTURE_DIR = path.resolve(
+  import.meta.dir, "..", "..", "tests", "fixtures", "skills", "integration",
+);
+
+/** Reads the live rule list out of an Agent's permission engine. */
+function engineRules(agent: Agent): PermissionRule[] {
+  const engine = getAgentInternals(agent).permissionEngine as unknown as {
+    opts: { rules: PermissionRule[] };
+  };
+  return engine.opts.rules;
+}
 
 // Minimal provider stub that satisfies the BaseProvider interface.
 function makeProvider(): BaseProvider {
@@ -170,5 +184,45 @@ describe("Agent.close()", () => {
     const agent = new Agent({ provider: makeProvider(), model: "m" });
     // Should complete without creating a SQLite file or throwing.
     await expect(agent.close()).resolves.toBeUndefined();
+  });
+});
+
+describe("Agent — shared permission rules array isolation (C4)", () => {
+  it("connectSkills does not mutate the caller's rules array; engines stay independent", async () => {
+    // One rules array shared by reference between two Agents.
+    const sharedRules: PermissionRule[] = [
+      { kind: "tool", tool: "Read", decision: "allow" },
+    ];
+
+    const makeAgentWithSharedRules = () =>
+      new Agent({
+        provider: makeProvider(),
+        model: "m",
+        sessionStore: new InMemorySessionStore(),
+        configDir: SKILLS_FIXTURE_DIR,
+        permissions: { rules: sharedRules },
+      });
+
+    const agentA = makeAgentWithSharedRules();
+    const agentB = makeAgentWithSharedRules();
+
+    // Skills (and their auto-allow Skill rules) load lazily on session().
+    await agentA.session();
+    await agentB.session();
+
+    // The caller's array is untouched — no skawld-internal Skill rule leaked in.
+    expect(sharedRules).toEqual([{ kind: "tool", tool: "Read", decision: "allow" }]);
+    expect(sharedRules.some(r => r.kind === "tool" && r.tool === "Skill")).toBe(false);
+
+    // The fixture has exactly one informational skill (commit) → exactly one
+    // auto-allow Skill rule per engine, and the two engines do not contaminate
+    // each other (no doubling from the shared source array).
+    const skillRulesA = engineRules(agentA).filter(r => r.kind === "tool" && r.tool === "Skill");
+    const skillRulesB = engineRules(agentB).filter(r => r.kind === "tool" && r.tool === "Skill");
+    expect(skillRulesA).toHaveLength(1);
+    expect(skillRulesB).toHaveLength(1);
+
+    await agentA.close();
+    await agentB.close();
   });
 });

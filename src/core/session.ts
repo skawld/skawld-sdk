@@ -108,9 +108,16 @@ interface SessionConstructorArgs {
   store: SessionStore;
 }
 
+// Module-level registry: a per-call registry is unreferenced after
+// makeCleanupIterator returns and may be collected before its callback runs,
+// making the abandonment safety net unreliable. One module-scoped registry is
+// always reachable. With C2's rejection-path cleanup this is only a last resort.
+const cleanupRegistry = new FinalizationRegistry<() => void>((fn) => fn());
+
 /**
  * Wraps an AsyncGenerator with explicit cleanup on:
  *   - Normal completion (done === true via next())
+ *   - A next() rejection (store failure before the loop's try — see C2)
  *   - Consumer calling return() (for-await break, explicit .return())
  *   - Consumer calling throw()
  *   - GC via FinalizationRegistry (handles pure abandonment without calling return())
@@ -129,11 +136,17 @@ function makeCleanupIterator<T>(
     }
   }
 
-  const registry = new FinalizationRegistry<() => void>((fn) => fn());
-
   const iter: AsyncGenerator<T> = {
     async next(...args: [] | [undefined]): Promise<IteratorResult<T>> {
-      const r = await gen.next(...args);
+      let r: IteratorResult<T>;
+      try {
+        r = await gen.next(...args);
+      } catch (err) {
+        // A rejection (not a normal `done`) skips the done-branch below; run
+        // cleanup here so activeRunId is released, then rethrow.
+        runCleanup();
+        throw err;
+      }
       if (r.done) runCleanup();
       return r;
     },
@@ -150,7 +163,7 @@ function makeCleanupIterator<T>(
     },
   };
 
-  registry.register(iter, runCleanup);
+  cleanupRegistry.register(iter, runCleanup);
   return iter;
 }
 

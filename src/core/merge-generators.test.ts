@@ -97,13 +97,31 @@ describe("mergeAsyncGenerators", () => {
     expect((caught as Error).message).toBe("kapow");
   });
 
-  test("yielded undefined values are skipped (matches Claude pattern)", async () => {
+  test("yielded undefined values are delivered, not dropped (C7)", async () => {
     async function* gen(): AsyncGenerator<number | undefined, void> {
       yield 1;
       yield undefined;
       yield 2;
     }
-    expect(await collect(mergeAsyncGenerators<number | undefined>([gen()]))).toEqual([1, 2]);
+    // done is carried through explicitly, so an `undefined` value is a real
+    // yield — not conflated with generator completion.
+    expect(await collect(mergeAsyncGenerators<number | undefined>([gen()]))).toEqual([1, undefined, 2]);
+  });
+
+  test("undefined interleaved across multiple generators is fully delivered (C7)", async () => {
+    async function* a(): AsyncGenerator<number | undefined, void> {
+      yield undefined;
+      yield 1;
+    }
+    async function* b(): AsyncGenerator<number | undefined, void> {
+      yield 2;
+      yield undefined;
+    }
+    const out = await collect(mergeAsyncGenerators<number | undefined>([a(), b()]));
+    expect(out).toHaveLength(4);
+    expect(out.filter(v => v === undefined)).toHaveLength(2);
+    expect(out.filter(v => v === 1)).toHaveLength(1);
+    expect(out.filter(v => v === 2)).toHaveLength(1);
   });
 
   test("cap=0 clamps to 1 (does not deadlock)", async () => {

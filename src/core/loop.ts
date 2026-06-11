@@ -202,7 +202,11 @@ async function* streamTurn(
       }
     } else if (ev.type === "tool_use_end") {
       const meta = toolBlocks.get(ev.id);
-      const rawJson = toolInputBufs.get(ev.id) ?? "";
+      // Providers emit zero input deltas for a tool call whose input is `{}`
+      // (Anthropic sends no input_json_delta; the OpenAI chat adapter forwards
+      // deltas only when arguments are non-empty). Treat an empty/whitespace
+      // buffer as `{}` so all-optional-param tools don't hit the invalid-JSON path.
+      const rawJson = (toolInputBufs.get(ev.id) ?? "").trim() || "{}";
       if (meta) {
         let input: Record<string, unknown>;
         try {
@@ -333,10 +337,13 @@ export async function* runLoop(
   const listingForFirstTurn =
     isFirstUserMessage && si.toolsOverride === undefined ? ai.skillListingText : undefined;
   const userMsg = buildUserMessage(prompt, opts.images, listingForFirstTurn);
-  await si.append([userMsg]);
-  yield { type: "user", message: userMsg };
 
   try {
+    // Append inside the try so a store failure (SQLite locked, disk full)
+    // surfaces as ErrorEvent + ResultEvent(error) rather than throwing raw.
+    await si.append([userMsg]);
+    yield { type: "user", message: userMsg };
+
     // maxTurns defaults to Infinity (unbounded): the loop runs until the model
     // stops calling tools, or the run aborts/errors. A finite maxTurns caps it
     // and falls through to the TurnLimitError below.

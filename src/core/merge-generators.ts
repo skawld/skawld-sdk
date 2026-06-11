@@ -28,6 +28,8 @@ export async function* mergeAsyncGenerators<T>(
   const next = (generator: AsyncGenerator<T, void>): Promise<QueuedGenerator<T>> => {
     const promise: Promise<QueuedGenerator<T>> = generator.next().then(
       ({ done, value }) => ({
+        // Carry the done flag explicitly — never infer it from the value, so a
+        // generator that yields `undefined` is delivered rather than dropped.
         done: !!done,
         value: done ? undefined : (value as T),
         generator,
@@ -39,19 +41,36 @@ export async function* mergeAsyncGenerators<T>(
 
   const waiting = [...generators];
   const promises = new Set<Promise<QueuedGenerator<T>>>();
+  // Generators we've started and not yet exhausted. On early exit (consumer
+  // break, or a sibling threw) we return() these so abandoned generators run
+  // their finally blocks instead of being left parked forever.
+  const active = new Set<AsyncGenerator<T, void>>();
 
-  while (promises.size < cap && waiting.length > 0) {
-    promises.add(next(waiting.shift()!));
-  }
+  const start = (generator: AsyncGenerator<T, void>) => {
+    active.add(generator);
+    promises.add(next(generator));
+  };
 
-  while (promises.size > 0) {
-    const { done, value, generator, promise } = await Promise.race(promises);
-    promises.delete(promise);
-    if (!done) {
-      promises.add(next(generator));
-      if (value !== undefined) yield value;
-    } else if (waiting.length > 0) {
-      promises.add(next(waiting.shift()!));
+  try {
+    while (promises.size < cap && waiting.length > 0) {
+      start(waiting.shift()!);
+    }
+
+    while (promises.size > 0) {
+      const { done, value, generator, promise } = await Promise.race(promises);
+      promises.delete(promise);
+      if (!done) {
+        promises.add(next(generator));
+        yield value as T;
+      } else {
+        active.delete(generator);
+        if (waiting.length > 0) start(waiting.shift()!);
+      }
+    }
+  } finally {
+    // Best-effort cancellation of anything still running; ignore return() errors.
+    for (const g of active) {
+      void g.return(undefined).catch(() => {});
     }
   }
 }

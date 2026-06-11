@@ -6,6 +6,7 @@ import { Agent, getAgentInternals } from "./agent.js";
 import { getSessionInternals } from "./session.js";
 import { InMemorySessionStore } from "../sessions/memory.js";
 import { ToolRegistry } from "../tools/registry.js";
+import { AbortError } from "./errors.js";
 import {
   MockReadTool,
   MockWriteTool,
@@ -799,6 +800,92 @@ class EmittingParallelTool implements Tool<Record<string, unknown>> {
     return { content: "ok", summary: this.name };
   }
 }
+
+/**
+ * Emits a burst of ctx events on start, then parks until abort and rejects with
+ * AbortError. Used to leave sibling generators suspended mid-iteration (parked
+ * at yield with buffered events) when one sibling's abort tears down the batch.
+ */
+class EmitHeavyAbortTool implements Tool<Record<string, unknown>> {
+  readonly name: string;
+  readonly description = "emits a burst then aborts";
+  readonly scope = "exec" as const;
+  readonly parallelSafe = true;
+  readonly input_schema = { type: "object" as const, properties: {} };
+  constructor(name: string, private readonly token: string, private readonly burst: number) {
+    this.name = name;
+  }
+  validate(raw: Record<string, unknown>): Record<string, unknown> { return raw; }
+  summarize(): string { return this.name; }
+  async execute(_input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    for (let i = 0; i < this.burst; i++) {
+      ctx.emit?.({
+        type: "subagent_event",
+        parent_session_id: "p",
+        subagent_run_id: `${this.token}-${i}`,
+        subagent_type: "test",
+        display_name: "t",
+        event: { type: "system", model: "m", tools: [], permissionMode: "yolo", subagentMode: false },
+      });
+    }
+    await new Promise<void>((_resolve, reject) => {
+      if (ctx.signal.aborted) { reject(new AbortError("aborted")); return; }
+      ctx.signal.addEventListener("abort", () => reject(new AbortError("aborted")), { once: true });
+    });
+    return { content: "ok", summary: this.name };
+  }
+}
+
+describe("scheduler — abort in parallel emit-heavy batch (no unhandled rejection)", () => {
+  it("abandoned siblings with buffered events do not produce unhandled rejections", async () => {
+    const captured: unknown[] = [];
+    const onUnhandled = (reason: unknown) => captured.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      // Asymmetric batch: a fast "aborter" with no buffered events reaches its
+      // throw first, tearing down the batch while the two heavy emitters still
+      // have a large backlog buffered — i.e. siblings parked at `yield`. Pre-fix
+      // their rejected runPromises were never awaited → unhandled rejections.
+      const aborter = new EmitHeavyAbortTool("EmitAbortA", "ea", 0);
+      const heavy1 = new EmitHeavyAbortTool("EmitAbortB", "eb", 100);
+      const heavy2 = new EmitHeavyAbortTool("EmitAbortC", "ec", 100);
+      const tools = new ToolRegistry();
+      tools.register(aborter); tools.register(heavy1); tools.register(heavy2);
+      const { ai, si } = await makeInternals({ tools });
+
+      const controller = new AbortController();
+      const blocks = [
+        makeToolUseBlock("tu-a", "EmitAbortA"),
+        makeToolUseBlock("tu-b", "EmitAbortB"),
+        makeToolUseBlock("tu-c", "EmitAbortC"),
+      ];
+      const gen = executeToolCalls(blocks, ai, si, controller.signal);
+
+      // Pull a few events so the heavy emitters are mid-stream with a backlog.
+      for (let i = 0; i < 5; i++) {
+        if ((await gen.next()).done) break;
+      }
+
+      // Abort while a large backlog remains buffered in the heavy emitters.
+      controller.abort();
+
+      // Drain the rest; the batch ultimately throws AbortError.
+      try {
+        while (!(await gen.next()).done) { /* consume */ }
+      } catch {
+        // expected AbortError
+      }
+
+      // Give any leaked rejection a chance to surface.
+      await new Promise(r => setTimeout(r, 40));
+
+      const abortRejections = captured.filter(r => r instanceof AbortError);
+      expect(abortRejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+});
 
 describe("scheduler — adjacent-batch partitioning", () => {
   it("[Read, Read, Write, Read] yields three batches with reads grouped only when adjacent", async () => {

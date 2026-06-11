@@ -466,15 +466,20 @@ export async function* executeToolCalls(
       // Parallel lane: run all calls concurrently up to ai.toolConcurrency.
       // Each call's events flow into its own ToolEventQueue, then the per-call
       // generators are merged via Promise.race to interleave by arrival order.
-      const sinks: Array<{ pair?: [number, ToolResultBlock] }> =
+      const sinks: Array<{ pair?: [number, ToolResultBlock]; error?: unknown }> =
         batch.calls.map(() => ({}));
       const startedIds = new Set<string>();
       const finishedIds = new Set<string>();
       const idToCall = new Map<string, ResolvedCall>();
 
       const generators = batch.calls.map(([call, idx, decision], local) => {
+        const sink = sinks[local]!;
         return (async function* (): AsyncGenerator<Event, void> {
           const queue = new ToolEventQueue();
+          // Capture any rejection into the sink so runPromise NEVER rejects.
+          // A sibling generator can be abandoned mid-flight (another tool threw
+          // AbortError, the merge exits) before reaching `await runPromise`; a
+          // rejecting promise would then become an unhandled rejection.
           const runPromise = runOneToolCall(
             call, idx, decision, ai, si, signal,
             (ev) => {
@@ -486,11 +491,12 @@ export async function* executeToolCalls(
               }
               queue.push(ev);
             },
-            sinks[local]!,
-          ).finally(() => queue.close());
+            sink,
+          ).catch((e) => { sink.error = e; }).finally(() => queue.close());
 
           for await (const ev of queue) yield ev;
-          await runPromise; // re-throws AbortError
+          await runPromise; // settled (never rejects); rethrow below if needed
+          if (sink.error) throw sink.error; // re-throws AbortError
         })();
       });
 

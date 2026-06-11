@@ -3,7 +3,11 @@ import { Agent } from "./agent.js";
 import { getSessionInternals } from "./session.js";
 import { ConfigError } from "./errors.js";
 import { InMemorySessionStore } from "../sessions/memory.js";
+import { MockProvider } from "./_test-mock-provider.js";
 import type { BaseProvider } from "../providers/base.js";
+import type { SessionStore } from "../sessions/store.js";
+import type { Message } from "./types.js";
+import type { Event } from "./events.js";
 
 function makeProvider(): BaseProvider {
   return {
@@ -158,5 +162,78 @@ describe("Session.run() — iterator abandonment cleanup", () => {
     expect(internal.activeRunId).toBeNull();
 
     expect(() => sess.run("prompt 2")).not.toThrow();
+  });
+});
+
+/** Delegates to an InMemorySessionStore but rejects the first N appendMessages calls. */
+function flakyAppendStore(inner: InMemorySessionStore, failTimes: number): SessionStore {
+  let failsLeft = failTimes;
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === "appendMessages") {
+        return async (id: string, messages: Message[]) => {
+          if (failsLeft > 0) {
+            failsLeft--;
+            throw new Error("appendMessages: database is locked");
+          }
+          return target.appendMessages(id, messages);
+        };
+      }
+      const v = Reflect.get(target, prop, receiver);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  }) as unknown as SessionStore;
+}
+
+describe("Session.run() — store failure on user append (C2)", () => {
+  it("yields ErrorEvent + ResultEvent(error) and leaves the Session reusable", async () => {
+    const provider = new MockProvider();
+    // Script only consumed by the SECOND run (first run fails before streaming).
+    provider.enqueue({
+      events: [
+        { type: "message_start", model: "m" },
+        { type: "text_delta", text: "second run ok" },
+        {
+          type: "message_end",
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        },
+      ],
+    });
+
+    const inner = new InMemorySessionStore();
+    const store = flakyAppendStore(inner, 1); // first appendMessages rejects once
+    const agent = new Agent({ provider, model: "m", sessionStore: store });
+    const sess = await agent.session();
+
+    // First run: the user-message append rejects → error + result(error), completes.
+    const first: Event[] = [];
+    for await (const ev of sess.run("prompt 1")) first.push(ev);
+
+    const errEvent = first.find(e => e.type === "error") as
+      | Extract<Event, { type: "error" }>
+      | undefined;
+    const resultEvent = first.find(e => e.type === "result") as
+      | Extract<Event, { type: "result" }>
+      | undefined;
+    expect(errEvent).toBeDefined();
+    expect(errEvent!.error.message).toContain("database is locked");
+    expect(resultEvent).toBeDefined();
+    expect(resultEvent!.subtype).toBe("error");
+    // No assistant/user message survived the failed append.
+    expect(first.some(e => e.type === "user")).toBe(false);
+
+    // The Session must be reusable: activeRunId released, second run starts normally.
+    expect(getSessionInternals(sess).activeRunId).toBeNull();
+
+    const second: Event[] = [];
+    for await (const ev of sess.run("prompt 2")) second.push(ev);
+    const secondResult = second.find(e => e.type === "result") as
+      | Extract<Event, { type: "result" }>
+      | undefined;
+    expect(secondResult).toBeDefined();
+    expect(secondResult!.subtype).toBe("success");
+
+    await agent.close();
   });
 });

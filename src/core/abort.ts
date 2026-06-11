@@ -2,18 +2,14 @@
 
 import { AbortError } from "./errors.js";
 
-/** Combine multiple AbortSignals. The result fires when any input fires. */
+/**
+ * Combine multiple AbortSignals. The result fires when any input fires.
+ * Backed by AbortSignal.any (Bun 1.1+), which uses weak listeners internally —
+ * so a long-lived caller signal reused across many runs accrues no lingering
+ * listeners once each combined signal is unreferenced.
+ */
 export function anySignal(signals: (AbortSignal | undefined)[]): AbortSignal {
-  const controller = new AbortController();
-  for (const s of signals) {
-    if (!s) continue;
-    if (s.aborted) {
-      controller.abort(s.reason);
-      break;
-    }
-    s.addEventListener("abort", () => controller.abort(s.reason), { once: true });
-  }
-  return controller.signal;
+  return AbortSignal.any(signals.filter((s): s is AbortSignal => s !== undefined));
 }
 
 /** Throw AbortError if the signal has fired. */

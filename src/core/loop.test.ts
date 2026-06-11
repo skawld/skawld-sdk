@@ -736,6 +736,83 @@ describe("runLoop — tool_use stream assembly", () => {
 
     await agent.close();
   });
+
+  it("dispatches input {} when no input deltas arrive (all-optional-param tool)", async () => {
+    const provider = new MockProvider();
+    provider.enqueue({
+      events: [
+        { type: "message_start", model: "test-model" },
+        // No tool_use_input_delta events at all — mirrors Anthropic's `{}` case.
+        { type: "tool_use_start", id: "tu-empty", name: "Write" },
+        { type: "tool_use_end", id: "tu-empty" },
+        {
+          type: "message_end",
+          stop_reason: "tool_use",
+          usage: { input_tokens: 5, output_tokens: 3 },
+        },
+      ],
+    });
+
+    const store = new InMemorySessionStore();
+    const agent = new Agent({ provider, model: "test-model", sessionStore: store });
+    const session = await agent.session();
+
+    const collected: Event[] = [];
+    for await (const ev of session.run("empty tool")) {
+      collected.push(ev);
+      if (ev.type === "assistant") break;
+    }
+
+    const asstEvent = collected.find(e => e.type === "assistant") as
+      | Extract<Event, { type: "assistant" }>
+      | undefined;
+    const toolBlock = asstEvent!.message.content.find(b => b.type === "tool_use") as
+      | { type: "tool_use"; input: Record<string, unknown> }
+      | undefined;
+    expect(toolBlock).toBeDefined();
+    expect(toolBlock!.input).toEqual({});
+    expect(toolBlock!.input.__invalidJson).toBeUndefined();
+
+    await agent.close();
+  });
+
+  it("treats a whitespace-only input buffer as {}", async () => {
+    const provider = new MockProvider();
+    provider.enqueue({
+      events: [
+        { type: "message_start", model: "test-model" },
+        { type: "tool_use_start", id: "tu-ws", name: "Write" },
+        { type: "tool_use_input_delta", id: "tu-ws", json_delta: "  \n  " },
+        { type: "tool_use_end", id: "tu-ws" },
+        {
+          type: "message_end",
+          stop_reason: "tool_use",
+          usage: { input_tokens: 5, output_tokens: 3 },
+        },
+      ],
+    });
+
+    const store = new InMemorySessionStore();
+    const agent = new Agent({ provider, model: "test-model", sessionStore: store });
+    const session = await agent.session();
+
+    const collected: Event[] = [];
+    for await (const ev of session.run("whitespace tool")) {
+      collected.push(ev);
+      if (ev.type === "assistant") break;
+    }
+
+    const asstEvent = collected.find(e => e.type === "assistant") as
+      | Extract<Event, { type: "assistant" }>
+      | undefined;
+    const toolBlock = asstEvent!.message.content.find(b => b.type === "tool_use") as
+      | { type: "tool_use"; input: Record<string, unknown> }
+      | undefined;
+    expect(toolBlock!.input).toEqual({});
+    expect(toolBlock!.input.__invalidJson).toBeUndefined();
+
+    await agent.close();
+  });
 });
 
 describe("runLoop — turn limit", () => {

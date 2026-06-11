@@ -169,7 +169,9 @@ export class Agent {
     const cwd = opts.cwd ?? process.cwd();
     const tools = opts.tools ?? defaultTools();
     const permMode: PermissionMode = opts.permissions?.mode ?? "default";
-    const permRules = opts.permissions?.rules ?? [];
+    // Copy so connectSkills' auto-allow pushes land on our array, never the
+    // caller's. The engine reads its `opts.rules` live, so pushes still reach it.
+    const permRules = [...(opts.permissions?.rules ?? [])];
 
     const permissionEngine = new PermissionEngine({
       mode: permMode,

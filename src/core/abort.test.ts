@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { getEventListeners } from "node:events";
 import { anySignal, throwIfAborted } from "./abort.js";
 import { AbortError } from "./errors.js";
 
@@ -26,6 +27,18 @@ describe("anySignal", () => {
     expect(combined.aborted).toBe(false);
     a.abort();
     expect(combined.aborted).toBe(true);
+  });
+
+  it("does not accumulate abort listeners on a reused caller signal (C5)", () => {
+    // A server reusing one shutdown signal across many runs must not leak a
+    // listener per run. AbortSignal.any uses weak listeners, so the public
+    // listener list stays empty no matter how many combined signals are made.
+    const caller = new AbortController();
+    for (let i = 0; i < 25; i++) {
+      // Simulate a completed run: build the combined signal and drop it.
+      void anySignal([caller.signal, undefined]);
+    }
+    expect(getEventListeners(caller.signal, "abort").length).toBe(0);
   });
 });
 
