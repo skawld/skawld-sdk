@@ -556,6 +556,65 @@ describe("mapWireEvents", () => {
     if (end?.type === "message_end") {
       expect(end.usage.cache_read_tokens).toBe(100);
       expect(end.usage.cache_creation_tokens).toBe(20);
+      // input_tokens is normalized to the cache-inclusive total prompt size
+      expect(end.usage.input_tokens).toBe(125);
+    }
+  });
+
+  it("normalizes input_tokens to include cache tokens from message_delta usage", async () => {
+    const events: unknown[] = [
+      {
+        type: "message_start",
+        message: { usage: { input_tokens: 1, output_tokens: 0 } },
+      },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: {
+          input_tokens: 800,
+          output_tokens: 7,
+          cache_read_input_tokens: 149_000,
+          cache_creation_input_tokens: 2_000,
+        },
+      },
+      { type: "message_stop" },
+    ];
+    const out = await collect(mapWireEvents(fromArray(events), "m"));
+    const end = out.find((e) => e.type === "message_end");
+    expect(end?.type).toBe("message_end");
+    if (end?.type === "message_end") {
+      expect(end.usage.input_tokens).toBe(151_800);
+      expect(end.usage.cache_read_tokens).toBe(149_000);
+      expect(end.usage.cache_creation_tokens).toBe(2_000);
+      expect(end.usage.output_tokens).toBe(7);
+    }
+  });
+
+  it("keeps the normalized total when a later delta omits input fields", async () => {
+    const events: unknown[] = [
+      {
+        type: "message_start",
+        message: {
+          usage: {
+            input_tokens: 800,
+            output_tokens: 0,
+            cache_read_input_tokens: 149_000,
+            cache_creation_input_tokens: 2_000,
+          },
+        },
+      },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 3 },
+      },
+    ];
+    const out = await collect(mapWireEvents(fromArray(events), "m"));
+    const end = out.find((e) => e.type === "message_end");
+    expect(end?.type).toBe("message_end");
+    if (end?.type === "message_end") {
+      expect(end.usage.input_tokens).toBe(151_800);
+      expect(end.usage.output_tokens).toBe(3);
     }
   });
 });

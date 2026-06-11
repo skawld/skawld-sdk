@@ -102,6 +102,24 @@ function buildCompactionEvent(si: SessionInternal): CompactionEvent {
   throw new Error("invariant: lastCompactionInfo must be set after maybeCompact returns true");
 }
 
+// Re-inject the skill listing + any previously invoked skill bodies after a
+// compaction so the model retains skill context once the older history is
+// summarized. Pushes directly to providerView (in-memory only) — the store
+// still has the originals; on resume the full history is replayed instead.
+// Shared by the threshold path (runLoop) and the forced ContextLengthError
+// recovery path (streamTurnWithContextRetry).
+function reinjectSkillContext(si: SessionInternal, ai: AgentInternal): void {
+  if (ai.skillListingText) {
+    si.providerView.push({ role: "user", content: [skillListingBlock(ai.skillListingText)] });
+  }
+  for (const rec of si.invokedSkills) {
+    si.providerView.push({
+      role: "user",
+      content: [{ type: "text", text: wrapInSystemReminder(rec.substitutedBody) }],
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // streamTurn: async generator that yields PartialAssistantEvents and returns
 // { assistantMessage, stopReason, usage } as its generator return value.
@@ -240,8 +258,11 @@ async function* streamTurnWithContextRetry(
   } catch (err) {
     if (err instanceof ContextLengthError && !si.compactionRetryUsedThisTurn) {
       si.markCompactionUsed();
-      await runForcedCompaction(si, ai, signal);
+      // If the strategy could not reduce the view, re-sending would only
+      // reproduce the same ContextLengthError — surface the original instead.
+      if (!(await runForcedCompaction(si, ai, signal))) throw err;
       yield buildCompactionEvent(si);
+      reinjectSkillContext(si, ai);
       // Retry uses the session's default model — the one-turn override is spent.
       const retryReq = buildRequest(si, ai, opts, signal);
       return yield* streamTurn(ai.provider, retryReq, ai.includePartialMessages);
@@ -328,20 +349,7 @@ export async function* runLoop(
       // Compact when projected token usage exceeds 80% of the context window.
       if (await maybeCompact(si, ai, signal)) {
         yield buildCompactionEvent(si);
-
-        // Re-inject the skill listing + any previously invoked skill bodies so
-        // the model retains skill context after the older history is summarized.
-        // Push directly to providerView (in-memory only) — store still has the
-        // originals; on resume the full history is replayed instead.
-        if (ai.skillListingText) {
-          si.providerView.push({ role: "user", content: [skillListingBlock(ai.skillListingText)] });
-        }
-        for (const rec of si.invokedSkills) {
-          si.providerView.push({
-            role: "user",
-            content: [{ type: "text", text: wrapInSystemReminder(rec.substitutedBody) }],
-          });
-        }
+        reinjectSkillContext(si, ai);
       }
 
       // Consume any pending one-turn skill overlay (model override + additive

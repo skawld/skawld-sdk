@@ -10,4 +10,5 @@ export {
   type CompactionStrategy,
   type CompactionContext,
   defaultCompaction,
+  stripResponseChaining,
 } from "./compaction.js";

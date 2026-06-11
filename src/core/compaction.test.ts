@@ -11,6 +11,7 @@ import {
   defaultCompaction,
   maybeCompact,
   runForcedCompaction,
+  stripResponseChaining,
 } from "./compaction.js";
 import type { Message } from "./types.js";
 import type { CompactionStrategy, CompactionContext } from "./compaction.js";
@@ -198,6 +199,140 @@ describe("defaultCompaction.compact", () => {
 });
 
 // ---------------------------------------------------------------------------
+// stripResponseChaining
+// ---------------------------------------------------------------------------
+
+describe("stripResponseChaining", () => {
+  function chainedMsg(text: string, responseId: string): Message {
+    return {
+      role: "assistant",
+      content: [{ type: "text", text }],
+      provider_metadata: { openai_responses: { response_id: responseId } },
+    };
+  }
+
+  it("removes response_id from every message without mutating the originals", () => {
+    const original = chainedMsg("a", "resp_1");
+    const plain = makeMsg("user", "b");
+    const result = stripResponseChaining([original, plain]);
+
+    expect(result[0]!.provider_metadata?.openai_responses?.response_id).toBeUndefined();
+    // Originals untouched — they are shared with fullHistory and the store
+    expect(original.provider_metadata!.openai_responses!.response_id).toBe("resp_1");
+    // Messages without a response_id pass through by reference
+    expect(result[1]).toBe(plain);
+  });
+
+  it("preserves other provider metadata while stripping the id", () => {
+    const msg: Message = {
+      role: "assistant",
+      content: [{ type: "text", text: "a" }],
+      provider_metadata: {
+        openai_responses: { response_id: "resp_1", output_items: [{ type: "message" }] },
+      },
+    };
+    const [result] = stripResponseChaining([msg]);
+    expect(result!.provider_metadata?.openai_responses?.response_id).toBeUndefined();
+    expect(result!.provider_metadata?.openai_responses?.output_items).toEqual([{ type: "message" }]);
+  });
+
+  it("drops provider_metadata entirely when nothing else remains", () => {
+    const [result] = stripResponseChaining([chainedMsg("a", "resp_1")]);
+    expect(result!.provider_metadata).toBeUndefined();
+  });
+
+  it("defaultCompaction returns a view with no response_id on any message", async () => {
+    const provider = new MockProvider();
+    provider.enqueue({
+      events: [
+        { type: "message_start", model: "test-model" },
+        { type: "text_delta", text: "summary" },
+        { type: "message_end", stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 5 } },
+      ],
+    });
+
+    const msgs = buildHistory(15);
+    // Mark every assistant message as a chained Responses turn
+    for (const m of msgs) {
+      if (m.role === "assistant") {
+        m.provider_metadata = { openai_responses: { response_id: `resp_${msgs.indexOf(m)}` } };
+      }
+    }
+
+    const result = await defaultCompaction.compact({
+      messages: msgs,
+      provider,
+      model: "test-model",
+      signal: new AbortController().signal,
+    });
+
+    for (const m of result) {
+      expect(m.provider_metadata?.openai_responses?.response_id).toBeUndefined();
+    }
+  });
+
+  it("post-compaction Responses payload replays statelessly, then chaining resumes", async () => {
+    const { buildPayload } = await import("../providers/openai-responses.js");
+    const provider = new MockProvider();
+    provider.enqueue({
+      events: [
+        { type: "message_start", model: "test-model" },
+        { type: "text_delta", text: "the summary" },
+        { type: "message_end", stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 5 } },
+      ],
+    });
+
+    const msgs = buildHistory(15);
+    for (const m of msgs) {
+      if (m.role === "assistant") {
+        m.provider_metadata = { openai_responses: { response_id: `resp_${msgs.indexOf(m)}` } };
+      }
+    }
+
+    const compacted = await defaultCompaction.compact({
+      messages: msgs,
+      provider,
+      model: "test-model",
+      signal: new AbortController().signal,
+    });
+
+    // The next request sends the whole compacted view (summary first) with no chaining
+    const payload = buildPayload({
+      model: "gpt-test",
+      system: [],
+      tools: [],
+      messages: compacted,
+      signal: new AbortController().signal,
+    });
+    expect(payload.previous_response_id).toBeUndefined();
+    const first = payload.input[0] as { type: string; role?: string; content?: Array<{ text?: string }> };
+    expect(first.role).toBe("user");
+    expect(first.content?.[0]?.text).toContain("the summary");
+    // All kept turns are present as input items (summary + 19 kept messages)
+    expect(payload.input.length).toBeGreaterThanOrEqual(compacted.length);
+
+    // A new chained assistant response after the stateless replay resumes chaining
+    const afterReplay: Message[] = [
+      ...compacted,
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "fresh" }],
+        provider_metadata: { openai_responses: { response_id: "resp_new" } },
+      },
+      makeMsg("user", "next prompt"),
+    ];
+    const chainedPayload = buildPayload({
+      model: "gpt-test",
+      system: [],
+      tools: [],
+      messages: afterReplay,
+      signal: new AbortController().signal,
+    });
+    expect(chainedPayload.previous_response_id).toBe("resp_new");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // maybeCompact
 // ---------------------------------------------------------------------------
 
@@ -290,6 +425,43 @@ describe("maybeCompact", () => {
     expect(si.lastCompactionInfo!.strategy).toBe("default-keep-recent-10");
     expect(si.lastCompactionInfo!.tokens_before).toBe(155_000);
     expect(si.lastCompactionInfo!.tokens_after).toBe(0); // unknown until next response
+
+    await agent.close();
+  });
+
+  it("triggers on cache-heavy usage where input_tokens is the cache-inclusive total", async () => {
+    // Steady-state cached session: almost all of the prompt is cache reads.
+    // Providers normalize input_tokens to the cache-inclusive total, so the
+    // 80% trigger must fire on input_tokens alone.
+    const provider = new MockProvider();
+    provider.enqueue({
+      events: [
+        { type: "message_start", model: "test-model" },
+        { type: "text_delta", text: "summary" },
+        {
+          type: "message_end",
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 5 },
+        },
+      ],
+    });
+
+    const { agent } = makeAgent(provider, { maxOutputTokens: 8192 });
+    const session = await agent.session();
+
+    const si = getSessionInternals(session);
+    const ai = getAgentInternals(agent);
+
+    const history = buildHistory(15);
+    si.providerView.length = 0;
+    for (const m of history) si.providerView.push(m);
+
+    // 161_000 total prompt, 159_000 of it cached reads. 161_000 + 8192 > 160_000.
+    si.lastUsage = { input_tokens: 161_000, output_tokens: 500, cache_read_tokens: 159_000, cache_creation_tokens: 0 };
+
+    const result = await maybeCompact(si, ai, new AbortController().signal);
+    expect(result).toBe(true);
+    expect(si.providerView.length).toBeLessThan(history.length);
 
     await agent.close();
   });
@@ -567,10 +739,14 @@ describe("runLoop — ContextLengthError recovery emits CompactionEvent", () => 
       ],
     });
 
-    // Use an override strategy that always compacts without calling provider
+    // Use an override strategy that always compacts without calling provider.
+    // It must actually change the view — an unchanged view is treated as a
+    // no-op and the ContextLengthError is rethrown instead of retried.
     const noop: CompactionStrategy = {
       id: "noop-recovery",
-      async compact({ messages }) { return messages.slice(-1).length > 0 ? messages.slice(-1) : messages; },
+      async compact() {
+        return [makeMsg("user", "condensed")];
+      },
     };
 
     const store = new InMemorySessionStore();
@@ -608,6 +784,103 @@ describe("runLoop — ContextLengthError recovery emits CompactionEvent", () => 
     expect(asstEvent).toBeDefined();
     const textBlock = asstEvent!.message.content.find(b => b.type === "text");
     expect((textBlock as { text: string } | undefined)?.text).toBe("recovered");
+
+    await agent.close();
+  });
+
+  it("re-injects skill listing and invoked skill bodies into the retry request", async () => {
+    const { ContextLengthError } = await import("./errors.js");
+    const provider = new MockProvider();
+
+    // Turn 1: context overflow
+    provider.enqueue({
+      events: [],
+      throwBefore: new ContextLengthError("context too long"),
+    });
+
+    // Retry: only matches when the re-injected skill context is in the request.
+    // Without re-injection the run falls back to an empty cursor queue and errors.
+    provider.enqueueFor(
+      (req) =>
+        req.messages.some(m =>
+          m.content.some(b => b.type === "text" && b.text.includes("skill_listing")),
+        ) &&
+        req.messages.some(m =>
+          m.content.some(b => b.type === "text" && b.text.includes("FOO SKILL BODY")),
+        ),
+      {
+        events: [
+          { type: "message_start", model: "test-model" },
+          { type: "text_delta", text: "recovered with skills" },
+          {
+            type: "message_end",
+            stop_reason: "end_turn",
+            usage: { input_tokens: 10, output_tokens: 5 },
+          },
+        ],
+      },
+    );
+
+    const changing: CompactionStrategy = {
+      id: "shrink",
+      async compact() {
+        return [makeMsg("user", "condensed")];
+      },
+    };
+
+    const store = new InMemorySessionStore();
+    const agent = new Agent({ provider, model: "test-model", sessionStore: store, compaction: changing });
+    const session = await agent.session();
+
+    const si = getSessionInternals(session);
+    const ai = getAgentInternals(agent);
+    ai.skillListingText = "foo: does foo things";
+    si.invokedSkills.push({ name: "foo", substitutedBody: "FOO SKILL BODY", invokedAt: 0 });
+
+    const events: import("./events.js").Event[] = [];
+    for await (const ev of session.run("hi")) {
+      events.push(ev);
+    }
+
+    const resultEvent = events.find(e => e.type === "result") as import("./events.js").ResultEvent | undefined;
+    expect(resultEvent?.subtype).toBe("success");
+    expect(events.some(e => e.type === "compaction")).toBe(true);
+
+    await agent.close();
+  });
+
+  it("rethrows ContextLengthError without re-sending when forced compaction is a no-op", async () => {
+    const { ContextLengthError } = await import("./errors.js");
+    const provider = new MockProvider();
+
+    // Exactly one script: the overflow. defaultCompaction on a 1-message view
+    // (fewer than 10 assistant turns) returns it unchanged, so the loop must
+    // NOT make a second provider call — a re-send would hit the empty queue
+    // and surface "no script enqueued" instead of ContextLengthError.
+    provider.enqueue({
+      events: [],
+      throwBefore: new ContextLengthError("context too long"),
+    });
+
+    const store = new InMemorySessionStore();
+    const agent = new Agent({ provider, model: "test-model", sessionStore: store });
+    const session = await agent.session();
+
+    const events: import("./events.js").Event[] = [];
+    for await (const ev of session.run("hi")) {
+      events.push(ev);
+    }
+
+    // No CompactionEvent for the no-op
+    expect(events.some(e => e.type === "compaction")).toBe(false);
+
+    // The original ContextLengthError surfaces
+    const errorEvent = events.find(e => e.type === "error") as import("./events.js").ErrorEvent | undefined;
+    expect(errorEvent).toBeDefined();
+    expect(errorEvent!.error.name).toBe("ContextLengthError");
+
+    const resultEvent = events.find(e => e.type === "result") as import("./events.js").ResultEvent | undefined;
+    expect(resultEvent?.subtype).toBe("error");
 
     await agent.close();
   });

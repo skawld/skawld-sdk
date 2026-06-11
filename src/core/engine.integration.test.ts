@@ -556,10 +556,12 @@ describe("integration — compaction trigger", () => {
 
 describe("integration — ContextLengthError recovery", () => {
   test("turn-1 ContextLengthError triggers compaction then retry; ends with success", async () => {
+    // The strategy must actually change the view — an unchanged view is a
+    // no-op and the ContextLengthError is rethrown instead of retried.
     const noopStrategy: CompactionStrategy = {
       id: "noop-ctx-recovery",
-      async compact({ messages }) {
-        return messages.slice(-1).length > 0 ? messages.slice(-1) : messages;
+      async compact() {
+        return [{ role: "user" as const, content: [{ type: "text" as const, text: "condensed" }] }];
       },
     };
 

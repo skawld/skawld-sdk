@@ -436,13 +436,20 @@ interface WireUsage {
 }
 
 function readUsage(u: WireUsage | undefined, prev: Usage): Usage {
+  // The wire's input_tokens excludes cache reads/writes; Usage.input_tokens is
+  // the cache-inclusive total prompt size (matching OpenAI semantics), with the
+  // cache fields as its breakdown. prev holds the normalized total, so recover
+  // the wire-level value by subtraction before re-normalizing.
+  const prevWireInput =
+    prev.input_tokens - (prev.cache_read_tokens ?? 0) - (prev.cache_creation_tokens ?? 0);
+  const wireInput = u?.input_tokens ?? prevWireInput;
+  const cr = u?.cache_read_input_tokens ?? prev.cache_read_tokens;
+  const cc = u?.cache_creation_input_tokens ?? prev.cache_creation_tokens;
   const next: Usage = {
-    input_tokens: u?.input_tokens ?? prev.input_tokens,
+    input_tokens: wireInput + (cr ?? 0) + (cc ?? 0),
     output_tokens: u?.output_tokens ?? prev.output_tokens,
   };
-  const cr = u?.cache_read_input_tokens ?? prev.cache_read_tokens;
   if (cr !== undefined) next.cache_read_tokens = cr;
-  const cc = u?.cache_creation_input_tokens ?? prev.cache_creation_tokens;
   if (cc !== undefined) next.cache_creation_tokens = cc;
   return next;
 }

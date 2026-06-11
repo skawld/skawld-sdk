@@ -61,6 +61,13 @@ export type StopReason =
   | "error";
 
 export interface Usage {
+  /**
+   * Total prompt size, cache-inclusive. The cache fields below are subsets of
+   * this value; cost accounting derives the uncached portion by subtraction
+   * (`input_tokens - cache_read_tokens - cache_creation_tokens`). Providers
+   * whose wire format excludes cache tokens from input (Anthropic) normalize
+   * before reporting.
+   */
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens?: number;
