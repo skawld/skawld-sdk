@@ -83,19 +83,68 @@ interface MatchLine {
 interface FileMatches {
   relPath: string;
   matches: MatchLine[];
+  /** The file's lines, kept so content mode doesn't re-read the file. */
+  lines: string[];
 }
 
-async function grepFile(absPath: string, relPath: string, re: RegExp): Promise<FileMatches | null> {
+/** Largest 1-indexed line number whose start offset is ≤ `offset`. Binary search. */
+function lineNoForOffset(lineStarts: number[], offset: number): number {
+  let lo = 0;
+  let hi = lineStarts.length - 1;
+  let ans = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (lineStarts[mid]! <= offset) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans + 1;
+}
+
+async function grepFile(
+  absPath: string,
+  relPath: string,
+  re: RegExp,
+  multiline: boolean,
+): Promise<FileMatches | null> {
   const buf = await fs.promises.readFile(absPath).catch(() => null);
   if (!buf || isBinary(buf)) return null;
-  const lines = buf.toString("utf8").split("\n");
+  const text = buf.toString("utf8");
+  const lines = text.split("\n");
+
+  if (multiline) {
+    // Match the whole file so patterns spanning newlines (or relying on dotall
+    // across lines) match; report the line each match begins on.
+    const lineStarts = [0];
+    for (let i = 0; i < lines.length - 1; i++) {
+      lineStarts.push(lineStarts[i]! + lines[i]!.length + 1);
+    }
+    const matches: MatchLine[] = [];
+    const seen = new Set<number>();
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const lineNo = lineNoForOffset(lineStarts, m.index);
+      if (!seen.has(lineNo)) {
+        seen.add(lineNo);
+        matches.push({ lineNo, text: lines[lineNo - 1] ?? "" });
+      }
+      if (m.index === re.lastIndex) re.lastIndex++; // guard against zero-width matches
+    }
+    matches.sort((a, b) => a.lineNo - b.lineNo);
+    return matches.length > 0 ? { relPath, matches, lines } : null;
+  }
+
   const matches: MatchLine[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
     re.lastIndex = 0;
     if (re.test(line)) matches.push({ lineNo: i + 1, text: line });
   }
-  return matches.length > 0 ? { relPath, matches } : null;
+  return matches.length > 0 ? { relPath, matches, lines } : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +210,9 @@ export async function runGrepFallback(input: GrepInput, searchRoot: string): Pro
   try {
     re = new RegExp(input.pattern, flags);
   } catch (err) {
-    return `Invalid regex: ${(err as Error).message}`;
+    // Surface as an error result (the rg path also fails on a bad pattern),
+    // rather than returning the message as successful match content.
+    throw new Error(`Invalid regex: ${(err as Error).message}`);
   }
 
   const ig = await loadGitignoreMatcher(searchRoot);
@@ -186,13 +237,11 @@ export async function runGrepFallback(input: GrepInput, searchRoot: string): Pro
 
   for (const relPath of files) {
     const absPath = path.join(searchRoot, relPath);
-    const fm = await grepFile(absPath, relPath, re);
+    const fm = await grepFile(absPath, relPath, re, input.multiline ?? false);
     if (fm) {
       results.push(fm);
-      if (mode === "content") {
-        const content = await fs.promises.readFile(absPath, "utf8").catch(() => "");
-        fileLines.set(relPath, content.split("\n"));
-      }
+      // Reuse the lines grepFile already read — no second read of the file.
+      if (mode === "content") fileLines.set(relPath, fm.lines);
     }
   }
 

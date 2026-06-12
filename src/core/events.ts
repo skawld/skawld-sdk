@@ -92,6 +92,12 @@ export interface CompactionEvent {
    */
   tokens_after: number;
   strategy: string;
+  /**
+   * Usage of the summarization call this compaction made, when the strategy ran
+   * one (the default strategy does). Otherwise undefined. Consumers tracking
+   * cost should add this to the run total — it is not folded into `total_usage`.
+   */
+  summary_usage?: Usage;
 }
 
 export interface ResultEvent {

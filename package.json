@@ -33,24 +33,24 @@
   "types": "./dist/sdk.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/sdk.js",
-      "types": "./dist/sdk.d.ts"
+      "types": "./dist/sdk.d.ts",
+      "import": "./dist/sdk.js"
     },
     "./providers": {
-      "import": "./dist/providers/index.js",
-      "types": "./dist/providers/index.d.ts"
+      "types": "./dist/providers/index.d.ts",
+      "import": "./dist/providers/index.js"
     },
     "./tools": {
-      "import": "./dist/tools/index.js",
-      "types": "./dist/tools/index.d.ts"
+      "types": "./dist/tools/index.d.ts",
+      "import": "./dist/tools/index.js"
     },
     "./sessions": {
-      "import": "./dist/sessions/index.js",
-      "types": "./dist/sessions/index.d.ts"
+      "types": "./dist/sessions/index.d.ts",
+      "import": "./dist/sessions/index.js"
     },
     "./permissions": {
-      "import": "./dist/permissions/index.js",
-      "types": "./dist/permissions/index.d.ts"
+      "types": "./dist/permissions/index.d.ts",
+      "import": "./dist/permissions/index.js"
     }
   },
   "files": [

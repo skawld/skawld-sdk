@@ -257,6 +257,36 @@ describe("SubagentTool — execute() named spawn", () => {
     expect(userInstrBlock).toBeDefined();
     expect(userInstrBlock!.text).toContain("You are a code reviewer.");
   });
+
+  it("a disk agent named 'general-purpose' wins over the built-in alias", async () => {
+    await writeAgent(
+      "general-purpose.md",
+      "---\ndescription: User's own general agent.\n---\nYou are the user's general agent.\n",
+    );
+    const rig = await makeRig();
+    rig.provider.enqueue(singleTextTurn("from disk agent"));
+
+    const tool = getSubagentTool(rig);
+    const emitted: SubagentEvent[] = [];
+    const ctx = makeCtx(rig, (e) => {
+      if (e.type === "subagent_event") emitted.push(e);
+    });
+
+    const result = await tool.execute(
+      { description: "go", prompt: "do it", subagent_type: "general-purpose" },
+      ctx,
+    );
+
+    expect(result.is_error).toBe(false);
+    expect(result.content).toBe("from disk agent");
+    // Resolves to the disk agent, not DEFAULT_AGENT_TYPE.
+    expect(emitted[0]!.subagent_type).toBe("general-purpose");
+    const childReq = rig.capturedRequests[rig.capturedRequests.length - 1]!;
+    const userInstrBlock = (childReq.system as Array<{ type: string; text: string }>).find(
+      (b) => b.type === "text" && b.text.includes("User-provided instructions"),
+    );
+    expect(userInstrBlock!.text).toContain("You are the user's general agent.");
+  });
 });
 
 describe("SubagentTool — execute() unknown subagent_type", () => {

@@ -29,12 +29,28 @@ describe("mapMcpResult", () => {
     expect(out.content).toEqual([{ type: "text", text: "[audio content omitted]" }]);
   });
 
-  test("degrades resource to text placeholder", () => {
+  test("emits embedded text resource with its URI", () => {
     const res = {
       content: [{ type: "resource", resource: { uri: "file://x", text: "y" } }],
     } as CallToolResult;
     const out = mapMcpResult(res);
-    expect(out.content).toEqual([{ type: "text", text: "[resource content omitted]" }]);
+    expect(out.content).toEqual([{ type: "text", text: "[resource file://x]\ny" }]);
+  });
+
+  test("omits binary blob resource but keeps the URI", () => {
+    const res = {
+      content: [{ type: "resource", resource: { uri: "file://b", blob: "AAAA" } }],
+    } as CallToolResult;
+    const out = mapMcpResult(res);
+    expect(out.content).toEqual([{ type: "text", text: "[resource content omitted: file://b]" }]);
+  });
+
+  test("emits resource_link URI", () => {
+    const res = {
+      content: [{ type: "resource_link", uri: "https://x/y", name: "y" }],
+    } as unknown as CallToolResult;
+    const out = mapMcpResult(res);
+    expect(out.content).toEqual([{ type: "text", text: "[resource link: https://x/y]" }]);
   });
 
   test("sets is_error and prefixes summary", () => {

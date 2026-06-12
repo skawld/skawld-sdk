@@ -307,7 +307,9 @@ export async function* runLoop(
     run_id: runId,
     model: ai.model,
     tools: effectiveTools.list().map(t => t.name).sort(),
-    permission_mode: agent.opts.permissions?.mode ?? "default",
+    // Report the mode the engine actually evaluates against (snapshotted at
+    // construction), not the publicly mutable opts.
+    permission_mode: ai.permissionEngine.mode,
     cwd: ai.cwd,
   };
 

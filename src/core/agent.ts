@@ -132,8 +132,10 @@ export interface AgentInternal {
   skillListingText: string | undefined;
   /** Connect skills + SkillTool lazily on first session(). Memoized. */
   connectSkills: () => Promise<void>;
-  /** Registry of session internals so SkillTool can locate the active session. */
-  sessions: Map<string, SessionInternal>;
+  /** Registry of session internals (held weakly) so SkillTool can locate the active session. */
+  sessions: Map<string, WeakRef<SessionInternal>>;
+  /** Register a session's internals for lookup + automatic pruning on GC. */
+  registerSession: (id: string, si: SessionInternal) => void;
   /** Subagent registry — disk-loaded agents + built-in default. Populated by connectSubagents. */
   subagentRegistry: AgentRegistry;
   /** Connect subagents + SubagentTool lazily on first session(). Memoized. */
@@ -162,6 +164,18 @@ export class Agent {
       (!Number.isInteger(opts.maxRetries) || opts.maxRetries < 0)
     ) {
       throw new ConfigError("Agent maxRetries must be a non-negative integer");
+    }
+    if (
+      opts.maxTurns !== undefined &&
+      (!Number.isInteger(opts.maxTurns) || opts.maxTurns < 1)
+    ) {
+      throw new ConfigError("Agent maxTurns must be an integer ≥ 1");
+    }
+    if (
+      opts.maxOutputTokens !== undefined &&
+      (!Number.isInteger(opts.maxOutputTokens) || opts.maxOutputTokens <= 0)
+    ) {
+      throw new ConfigError("Agent maxOutputTokens must be a positive integer");
     }
 
     this.opts = opts;
@@ -241,7 +255,20 @@ export class Agent {
     };
 
     const skills = new Map<string, Skill>();
-    const sessions = new Map<string, SessionInternal>();
+    // Sessions are held weakly so a long-lived Agent doesn't retain every session
+    // it ever created. When a Session (and its internals) is collected, the
+    // registry prunes the map entry and the matching subagent counter.
+    const sessions = new Map<string, WeakRef<SessionInternal>>();
+    const sessionCleanup = new FinalizationRegistry<string>((sid) => {
+      if (sessions.get(sid)?.deref() === undefined) {
+        sessions.delete(sid);
+        subagentRunCounters.delete(sid);
+      }
+    });
+    const registerSession = (id: string, si: SessionInternal): void => {
+      sessions.set(id, new WeakRef(si));
+      sessionCleanup.register(si, id);
+    };
     const configDir = opts.configDir
       ? path.resolve(cwd, opts.configDir)
       : path.resolve(cwd, ".skawld");
@@ -261,7 +288,7 @@ export class Agent {
             // the per-session registry built by Agent.session().
             const skillTool = new SkillTool({
               skills,
-              getSessionInternal: (sid) => sessions.get(sid),
+              getSessionInternal: (sid) => sessions.get(sid)?.deref(),
               getSessionModel: () => internal.model,
             });
             tools.register(skillTool);
@@ -304,7 +331,7 @@ export class Agent {
           internal.subagentRegistry = buildAgentRegistry(diskAgents);
           const subagentTool = new SubagentTool({
             registry: internal.subagentRegistry,
-            getSessionInternal: (sid) => sessions.get(sid),
+            getSessionInternal: (sid) => sessions.get(sid)?.deref(),
             nextDefaultDisplayName: (sid) => {
               const cur = subagentRunCounters.get(sid) ?? 0;
               subagentRunCounters.set(sid, cur + 1);
@@ -344,6 +371,7 @@ export class Agent {
       skillListingText: undefined,
       connectSkills,
       sessions,
+      registerSession,
       // Initialize with built-in-default-only; connectSubagents rebuilds after disk load.
       subagentRegistry: buildAgentRegistry([]),
       connectSubagents,
@@ -373,9 +401,9 @@ export class Agent {
     const providerView = storedMessages.map(sm => sm.message);
 
     const session = new Session({ record, providerView, agent: this, store });
-    // Register session for SkillTool lookup. Stays for the Agent's lifetime;
-    // memory is bounded by user-created session count.
-    internal.sessions.set(record.id, getSessionInternals(session));
+    // Register session for SkillTool/Subagent lookup. Held weakly and pruned when
+    // the Session is garbage-collected, so a long-lived Agent stays bounded.
+    internal.registerSession(record.id, getSessionInternals(session));
     return session;
   }
 

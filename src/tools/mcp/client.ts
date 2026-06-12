@@ -11,13 +11,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, Tool as McpToolDefinition } from "@modelcontextprotocol/sdk/types.js";
 import type { Tool } from "../base.js";
 import { ConfigError } from "../../core/errors.js";
 import { SKAWLD_VERSION } from "../../core/version.js";
 import { type McpServerConfig, mcpServerType } from "./config.js";
-import { normalizeNameForMcp } from "./naming.js";
+import { buildMcpToolName, normalizeNameForMcp } from "./naming.js";
 import { makeMcpTool } from "./tool.js";
+
+/** Providers reject tool names longer than this; mirror the limit at connect time. */
+const QUALIFIED_NAME_MAX = 128;
 
 /** A live set of MCP connections and the tools they expose. */
 export interface McpConnection {
@@ -45,26 +48,90 @@ function createTransport(config: McpServerConfig): Transport {
   });
 }
 
+/** Fetch every page of a server's tool list — cursor handling is the caller's job. */
+export async function listAllTools(client: Client): Promise<McpToolDefinition[]> {
+  const all: McpToolDefinition[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await client.listTools(cursor !== undefined ? { cursor } : undefined);
+    all.push(...page.tools);
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  return all;
+}
+
 async function connectOne(
   name: string,
   config: McpServerConfig,
-): Promise<{ client: Client; tools: Tool[] }> {
+): Promise<{ name: string; client: Client; config: McpServerConfig; mcpTools: McpToolDefinition[] }> {
   const client = new Client({ name: "skawld", version: SKAWLD_VERSION }, { capabilities: {} });
   await client.connect(createTransport(config));
   try {
-    const { tools: mcpTools } = await client.listTools();
-    const tools = mcpTools.map((t) =>
-      makeMcpTool(name, t, (toolName, args, signal): Promise<CallToolResult> =>
-        client.callTool({ name: toolName, arguments: args }, undefined, { signal }) as Promise<CallToolResult>,
-      ),
-    );
-    return { client, tools };
+    const mcpTools = await listAllTools(client);
+    return { name, client, config, mcpTools };
   } catch (err) {
     // The child process already spawned during connect(); close it so a
     // post-connect failure (e.g. listTools) does not leak it.
     await client.close().catch(() => {});
     throw err;
   }
+}
+
+function wrapTools(
+  serverName: string,
+  client: Client,
+  config: McpServerConfig,
+  mcpTools: McpToolDefinition[],
+): Tool[] {
+  const timeoutMs = config.timeoutMs;
+  return mcpTools.map((t) =>
+    makeMcpTool(serverName, t, (toolName, args, signal): Promise<CallToolResult> =>
+      client.callTool(
+        { name: toolName, arguments: args },
+        undefined,
+        timeoutMs !== undefined
+          ? { signal, timeout: timeoutMs, resetTimeoutOnProgress: true }
+          : { signal },
+      ) as Promise<CallToolResult>,
+    ),
+  );
+}
+
+/**
+ * Detect qualified-name collisions and over-length names across all servers.
+ * Normalization (`foo.bar` and `foo_bar` → `foo_bar`) or cross-server boundary
+ * ambiguity (`a__b` + `c` vs `a` + `b__c`) can make two tools share one name —
+ * registering both would throw deep inside the memoized connect and brick every
+ * future session. Surface it here, once, naming the offenders.
+ */
+export function findQualifiedNameProblems(
+  opened: { name: string; mcpTools: McpToolDefinition[] }[],
+): string[] {
+  const seen = new Map<string, { server: string; tool: string }>();
+  const collisions: string[] = [];
+  const tooLong: string[] = [];
+  for (const o of opened) {
+    for (const t of o.mcpTools) {
+      const qualified = buildMcpToolName(o.name, t.name);
+      if (qualified.length > QUALIFIED_NAME_MAX) {
+        tooLong.push(`'${o.name}'/'${t.name}' → ${qualified.length} chars`);
+      }
+      const prev = seen.get(qualified);
+      if (prev) {
+        collisions.push(
+          `'${qualified}' from server '${prev.server}' tool '${prev.tool}' and server '${o.name}' tool '${t.name}'`,
+        );
+      } else {
+        seen.set(qualified, { server: o.name, tool: t.name });
+      }
+    }
+  }
+  const problems: string[] = [];
+  if (collisions.length > 0) problems.push(`qualified tool-name collisions: ${collisions.join("; ")}`);
+  if (tooLong.length > 0) {
+    problems.push(`qualified tool-name exceeds ${QUALIFIED_NAME_MAX} chars: ${tooLong.join("; ")}`);
+  }
+  return problems;
 }
 
 /** Connect to every configured MCP server. Fail-fast with full teardown. */
@@ -96,10 +163,17 @@ export async function connectMcpServers(
     throw new ConfigError(`Failed to connect MCP server(s): ${failures.join("; ")}`);
   }
 
+  const problems = findQualifiedNameProblems(opened);
+  if (problems.length > 0) {
+    await Promise.allSettled(opened.map((o) => o.client.close()));
+    throw new ConfigError(`MCP tool registration failed: ${problems.join(". ")}`);
+  }
+
   const clients = opened.map((o) => o.client);
+  const tools = opened.flatMap((o) => wrapTools(o.name, o.client, o.config, o.mcpTools));
   let closed = false;
   return {
-    tools: opened.flatMap((o) => o.tools),
+    tools,
     async close(): Promise<void> {
       if (closed) return;
       closed = true;

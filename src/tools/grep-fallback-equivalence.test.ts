@@ -235,4 +235,75 @@ describe("Grep fallback equivalence", () => {
   it.skipIf(!hasRg)("S14: leading-dash pattern '--flag' (files_with_matches)", async () => {
     expect(await fbLines("--flag")).toEqual(await rgLines("--flag"));
   });
+
+  // F2: multiline mode must match across newlines in the fallback too. A pattern
+  // spanning the function signature and the next line only matches when the regex
+  // runs against the whole file, not line-by-line.
+  it.skipIf(!hasRg)("S15: multiline pattern across newline (files_with_matches)", async () => {
+    const fb = await fbLines("add\\([^)]*\\)\\s*\\{\\s*\\n\\s*return", { multiline: true });
+    const rg = await rgLines("add\\([^)]*\\)\\s*\\{\\s*\\n\\s*return", { multiline: true });
+    expect(fb).toEqual(rg);
+    expect(fb).toEqual(["src/foo.ts"]);
+  });
+
+  // F3: an invalid regex is an error on both paths, not a match result. The rg
+  // path exits non-zero (runRipgrep throws); the fallback throws too.
+  it.skipIf(!hasRg)("S16: invalid regex errors on both paths", async () => {
+    const input = tool.validate({ pattern: "[invalid", path: fixtureDir });
+    let fbThrew = false;
+    try {
+      await runGrepFallback(input, fixtureDir);
+    } catch {
+      fbThrew = true;
+    }
+    expect(fbThrew).toBe(true);
+    let rgThrew = false;
+    try {
+      await runRipgrep(buildRgArgs(input, fixtureDir), fixtureDir);
+    } catch {
+      rgThrew = true;
+    }
+    expect(rgThrew).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Glob fallback equivalence (F1, F4)
+// ---------------------------------------------------------------------------
+
+describe("Glob fallback equivalence", () => {
+  // F4: a slash-less glob pattern must match at any depth in the fallback, the
+  // same way rg's gitignore-style globs do.
+  it.skipIf(!hasRg)("G-S1: slash-less '*.ts' matches at any depth", async () => {
+    const rg = await runRipgrep(["--files", "--glob", "*.ts", "--glob", "!.*", fixtureDir], fixtureDir);
+    const rgFiles = rg.noMatches
+      ? []
+      : rg.output
+          .split("\n")
+          .map((l) => l.replace(/\r$/, ""))
+          .filter(Boolean)
+          .map((f) => (path.isAbsolute(f) ? path.relative(fixtureDir, f) : f))
+          .sort();
+    const { runGlobFallbackForTest } = await import("./glob.js");
+    const fb = (await runGlobFallbackForTest("*.ts", fixtureDir)).sort();
+    expect(fb).toEqual(rgFiles);
+    // sanity: the nested file is present
+    expect(fb).toContain("src/foo.ts");
+  });
+
+  // F1: the fallback honors .gitignore like `rg --files` does.
+  it.skipIf(!hasRg)("G-S2: fallback respects .gitignore", async () => {
+    const giDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "skawld-glob-equiv-"));
+    try {
+      await fs.promises.mkdir(path.join(giDir, "build"), { recursive: true });
+      await fs.promises.writeFile(path.join(giDir, "keep.ts"), "x", "utf8");
+      await fs.promises.writeFile(path.join(giDir, "build", "out.ts"), "x", "utf8");
+      await fs.promises.writeFile(path.join(giDir, ".gitignore"), "build/\n", "utf8");
+      const { runGlobFallbackForTest } = await import("./glob.js");
+      const fb = (await runGlobFallbackForTest("*.ts", giDir)).sort();
+      expect(fb).toEqual(["keep.ts"]);
+    } finally {
+      await fs.promises.rm(giDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -50,6 +50,11 @@ const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdat
 export class PermissionEngine {
   constructor(private readonly opts: PermissionEngineOptions) {}
 
+  /** The mode this engine evaluates against — snapshotted at construction. */
+  get mode(): PermissionMode {
+    return this.opts.mode;
+  }
+
   evaluate(call: PendingToolCall): PermissionDecision {
     const invalidReason = validatePendingCall(call);
     if (invalidReason !== undefined) return { decision: "deny", reason: invalidReason };
@@ -118,6 +123,10 @@ export class PermissionEngine {
   }
 
   private evaluateRules(call: PendingToolCall): PermissionDecision | undefined {
+    // The first bash rule encountered evaluates the entire bash rule set in order;
+    // later bash rules would only re-run a strictly smaller subset that already
+    // returned undefined, so evaluate the bash set at most once.
+    let bashEvaluated = false;
     for (let index = 0; index < this.opts.rules.length; index++) {
       const rule = this.opts.rules[index];
       if (rule === undefined) continue;
@@ -128,7 +137,8 @@ export class PermissionEngine {
       if (rule.kind === "path" && matchPathRule(rule, call, this.opts.projectRoot)) {
         return fromRuleDecision(rule.decision, `${rule.kind} rule matched ${call.tool.name}.`);
       }
-      if (rule.kind === "bash" && call.tool.name === "Bash") {
+      if (rule.kind === "bash" && call.tool.name === "Bash" && !bashEvaluated) {
+        bashEvaluated = true;
         const command = call.input.command;
         if (typeof command !== "string") continue;
         const bashDecision = evaluateBashRules(bashRulesFrom(this.opts.rules, index), command);

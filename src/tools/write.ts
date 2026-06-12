@@ -49,8 +49,18 @@ export class WriteTool implements Tool<WriteInput> {
     const absPath = resolvePath(input.file_path, ctx.cwd);
     const relPath = path.relative(ctx.cwd, absPath);
 
-    // Read-before-overwrite: if file exists and hasn't been read, refuse.
     const exists = fs.existsSync(absPath);
+    // Reject writing onto a directory (or other non-regular file) with a clear
+    // message rather than a misleading read-before-write error.
+    if (exists && !fs.statSync(absPath).isFile()) {
+      return {
+        content: `Error: ${relPath} exists and is not a regular file.`,
+        summary: this.summarize(input),
+        is_error: true,
+      };
+    }
+
+    // Read-before-overwrite: if file exists and hasn't been read, refuse.
     if (exists && !ctx.fileReadTracker.hasRead(absPath)) {
       return {
         content:

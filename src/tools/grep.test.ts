@@ -273,11 +273,12 @@ describe("GrepTool — summarize", () => {
 });
 
 describe("GrepTool — invalid regex", () => {
-  it("returns error result for bad regex pattern", async () => {
+  it("returns an error result for a bad regex pattern (both paths)", async () => {
     const input = tool.validate({ pattern: "[invalid" });
     const result = await tool.execute(input, makeCtx(fixtureDir));
-    // The fallback catches the regex error and returns it as a string
-    // The rg path may reject differently — either way no throw
+    // Both the rg path (exit 2) and the fallback (throw) surface this as an error
+    // result, not as successful match content.
+    expect(result.is_error).toBe(true);
     expect(typeof result.content).toBe("string");
   });
 });

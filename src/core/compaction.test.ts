@@ -425,6 +425,8 @@ describe("maybeCompact", () => {
     expect(si.lastCompactionInfo!.strategy).toBe("default-keep-recent-10");
     expect(si.lastCompactionInfo!.tokens_before).toBe(155_000);
     expect(si.lastCompactionInfo!.tokens_after).toBe(0); // unknown until next response
+    // The summarization call's usage is surfaced for cost accounting.
+    expect(si.lastCompactionInfo!.summary_usage).toEqual({ input_tokens: 100, output_tokens: 5 });
 
     await agent.close();
   });

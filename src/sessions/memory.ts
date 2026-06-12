@@ -3,6 +3,7 @@ import type { InvokedSkillRecord, Message } from "../core/types.js";
 import type { SessionRecord, SessionStore, StoredMessage } from "./store.js";
 import type { CreateTaskInput, Task, TaskPatch, TaskStatus } from "./tasks.js";
 import { hasCycle } from "./sqlite-helpers.js";
+import { SessionStoreError } from "../core/errors.js";
 
 interface EdgeRow { from: string; to: string }
 
@@ -27,8 +28,12 @@ export class InMemorySessionStore implements SessionStore {
   async load(id: string): Promise<SessionRecord | undefined> {
     const rec = this.sessions.get(id);
     if (!rec) return undefined;
+    // Return a deep-enough copy so callers mutating the result can't reach into
+    // the store's live record (sqlite returns freshly parsed copies).
+    const copy: SessionRecord = { ...rec, meta: { ...rec.meta } };
     const skills = this.invokedSkills.get(id);
-    return skills && skills.length > 0 ? { ...rec, invokedSkills: skills.slice() } : rec;
+    if (skills && skills.length > 0) copy.invokedSkills = skills.slice();
+    return copy;
   }
 
   async setInvokedSkills(id: string, skills: InvokedSkillRecord[]): Promise<void> {
@@ -43,7 +48,9 @@ export class InMemorySessionStore implements SessionStore {
 
   async appendMessages(id: string, messages: Message[]): Promise<StoredMessage[]> {
     const existing = this.messages.get(id) ?? [];
-    const maxSeq = existing.length > 0 ? Math.max(...existing.map(m => m.seq)) : 0;
+    // Running max (not Math.max(...spread)) to avoid a call-stack overflow at ~100k+ messages.
+    let maxSeq = 0;
+    for (const m of existing) if (m.seq > maxSeq) maxSeq = m.seq;
     const now = new Date().toISOString();
     const appended: StoredMessage[] = messages.map((msg, i) => ({
       seq: maxSeq + i + 1,
@@ -57,10 +64,11 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   async updateMeta(id: string, meta: Record<string, unknown>): Promise<SessionRecord> {
-    const session = this.sessions.get(id)!;
+    const session = this.sessions.get(id);
+    if (!session) throw new SessionStoreError(`Cannot updateMeta: session not found: ${id}`);
     const updated = { ...session, meta: { ...session.meta, ...meta }, updated_at: new Date().toISOString() };
     this.sessions.set(id, updated);
-    return updated;
+    return { ...updated, meta: { ...updated.meta } };
   }
 
   async list(opts?: { limit?: number; offset?: number }): Promise<SessionRecord[]> {
@@ -168,6 +176,19 @@ export class InMemorySessionStore implements SessionStore {
         }
       }
       return undefined;
+    }
+
+    // Reject edges that reference a non-existent task (mirror sqlite's FK throw,
+    // with a clean message). Validate before any mutation so nothing is staged.
+    for (const toId of patch.add_blocks ?? []) {
+      if (!sessionTasks!.has(toId)) {
+        throw new SessionStoreError(`Cannot add blocks edge: task '${toId}' does not exist in session '${sessionId}'`);
+      }
+    }
+    for (const fromId of patch.add_blocked_by ?? []) {
+      if (!sessionTasks!.has(fromId)) {
+        throw new SessionStoreError(`Cannot add blocked_by edge: task '${fromId}' does not exist in session '${sessionId}'`);
+      }
     }
 
     const now = new Date().toISOString();

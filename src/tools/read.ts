@@ -41,6 +41,9 @@ const LARGE_FILE_THRESHOLD = 1024 * 1024; // 1 MiB
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5 MiB
 const BINARY_DETECT_BYTES = 8192;
 const MAX_LINE_LENGTH = 2000;
+// Per-line truncation alone permits ~4 MB (2000 lines × 2000 chars); cap the
+// whole result so a single Read can't flood the model's context.
+const MAX_TOTAL_OUTPUT = 400_000;
 
 function isDevicePath(absPath: string): boolean {
   return DEVICE_PREFIXES.some(prefix => absPath.startsWith(prefix));
@@ -165,6 +168,8 @@ export class ReadTool implements Tool<ReadInput> {
   }
 
   async execute(input: ReadInput, ctx: ToolContext): Promise<ToolResult> {
+    if (ctx.signal.aborted) return error("Read aborted.", input, this);
+
     const absPath = resolvePath(input.file_path, ctx.cwd);
     const offset = input.offset ?? 1;
     const limit = input.limit ?? 2000;
@@ -191,6 +196,8 @@ export class ReadTool implements Tool<ReadInput> {
     }
 
     if (stat.isDirectory()) return error("Path is a directory.", input, this);
+    // FIFOs/sockets/etc. would otherwise stream forever or read as "<file is empty>".
+    if (!stat.isFile()) return error("Path is not a regular file.", input, this);
 
     const ext = path.extname(absPath).toLowerCase();
 
@@ -307,7 +314,7 @@ export class ReadTool implements Tool<ReadInput> {
     }
 
     const formatted = formatNumberedLines(rawLines, offset);
-    const truncated = truncateLines(formatted);
+    const truncated = truncateOutput(truncateLines(formatted), MAX_TOTAL_OUTPUT);
 
     return {
       content: truncated,

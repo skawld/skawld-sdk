@@ -39,6 +39,8 @@ export async function loadSkillsFromDir(opts: LoadSkillsOptions): Promise<LoadSk
   const skills: Skill[] = [];
   const skipped: SkippedSkill[] = [];
   const seenNames = new Set<string>();
+  // Skill names are normalized to lowercase, so compare against builtins the same way.
+  const builtinNamesLower = new Set([...opts.builtinToolNames].map((n) => n.toLowerCase()));
 
   for (const ent of entries) {
     const entryDir = path.join(skillsRoot, ent.name);
@@ -69,7 +71,7 @@ export async function loadSkillsFromDir(opts: LoadSkillsOptions): Promise<LoadSk
     }
     const { frontmatter, body } = parsed.value;
 
-    if (opts.builtinToolNames.has(frontmatter.name)) {
+    if (builtinNamesLower.has(frontmatter.name)) {
       skipped.push({
         dir: entryDir,
         reason: "name-collision-tool",
@@ -139,12 +141,19 @@ function parseFrontmatter(raw: string, dirName: string): ParseResult {
     if (!SKILL_NAME_RE.test(name)) {
       fail(`skill name '${name}' must match /^[a-z0-9][a-z0-9_-]*$/i`);
     }
+    // The grammar is case-insensitive but the registry keys and lookups are not;
+    // normalize to lowercase so 'Foo' and 'foo' resolve identically and collide.
+    name = name.toLowerCase();
 
     const args = optionalStringArray(obj, "arguments", ARG_NAME_RE, "must match /^[a-z_][a-z0-9_]*$/i");
     if (args) {
       const seen = new Set<string>();
       for (const a of args) {
-        if (a === "ARGUMENTS") fail("frontmatter 'arguments' entry must not be 'ARGUMENTS' (reserved)");
+        // Reject names that collide with the reserved `$ARGUMENTS` token, including
+        // prefixes like `ARGUMENTSX` that the single-pass matcher would split.
+        if (a.toUpperCase().startsWith("ARGUMENTS")) {
+          fail(`frontmatter 'arguments' entry '${a}' must not start with 'ARGUMENTS' (reserved)`);
+        }
         if (seen.has(a)) fail(`frontmatter 'arguments' contains duplicate '${a}'`);
         seen.add(a);
       }

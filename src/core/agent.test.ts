@@ -59,6 +59,14 @@ describe("Agent constructor", () => {
     ).toThrow(ConfigError);
   });
 
+  it("throws ConfigError when maxTurns or maxOutputTokens is invalid", () => {
+    const base = { provider: makeProvider(), model: "test-model" };
+    expect(() => new Agent({ ...base, maxTurns: 0 })).toThrow(ConfigError);
+    expect(() => new Agent({ ...base, maxTurns: 2.5 })).toThrow(ConfigError);
+    expect(() => new Agent({ ...base, maxOutputTokens: 0 })).toThrow(ConfigError);
+    expect(() => new Agent({ ...base, maxOutputTokens: -10 })).toThrow(ConfigError);
+  });
+
   it("applies default values", () => {
     const store = new InMemorySessionStore();
     const agent = new Agent({ provider: makeProvider(), model: "my-model", sessionStore: store });

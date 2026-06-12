@@ -27,7 +27,10 @@ export interface SessionStore {
   /** Create a session. If id is provided and already exists, return the existing record. */
   create(record: { id?: string; meta?: Record<string, unknown> }): Promise<SessionRecord>;
 
-  /** Load metadata for a session. Returns undefined if not found. */
+  /**
+   * Load metadata for a session. Returns undefined if not found.
+   * Contract: the returned record is a copy — mutating it MUST NOT affect the store.
+   */
   load(id: string): Promise<SessionRecord | undefined>;
 
   /** Load all messages for a session in seq order. */
@@ -39,7 +42,11 @@ export interface SessionStore {
    */
   appendMessages(id: string, messages: Message[]): Promise<StoredMessage[]>;
 
-  /** Update the session's metadata (shallow merge). */
+  /**
+   * Update the session's metadata (shallow merge). Read-merge-write MUST be
+   * atomic so concurrent calls don't lose each other's keys.
+   * Contract: throws `SessionStoreError` if the session does not exist.
+   */
   updateMeta(id: string, meta: Record<string, unknown>): Promise<SessionRecord>;
 
   /**
@@ -63,7 +70,11 @@ export interface SessionStore {
   /** List all tasks for this session, sorted by numeric id ascending. */
   listTasks(sessionId: string): Promise<Task[]>;
 
-  /** Patch one task. Returns undefined if the task does not exist. */
+  /**
+   * Patch one task. Returns undefined if the task does not exist.
+   * Contract: an `add_blocks`/`add_blocked_by` edge referencing a non-existent
+   * task throws `SessionStoreError`; a dependency cycle throws.
+   */
   updateTask(sessionId: string, taskId: string, patch: TaskPatch): Promise<Task | undefined>;
 
   /** Delete one task and its dependency edges. Returns whether a row was deleted. */

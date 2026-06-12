@@ -54,9 +54,11 @@ export class SubagentTool implements Tool<SubagentInput> {
 
   readonly input_schema = SCHEMA;
 
-  constructor(private readonly opts: SubagentToolOptions) {}
+  // The catalog is fixed once the registry is built (at connect), so compute the
+  // description once rather than rebuilding the string on every schemas() read.
+  readonly description: string;
 
-  get description(): string {
+  constructor(private readonly opts: SubagentToolOptions) {
     const list = this.opts.registry.list();
     const header = "Launch a subagent to handle a focused task.";
     const trailer = [
@@ -64,9 +66,17 @@ export class SubagentTool implements Tool<SubagentInput> {
       "The subagent returns a single text response; its tool calls and partial output",
       "stream into your event log while it runs.",
     ].join("\n");
-    if (list.length === 0) return [header, "", trailer].join("\n");
-    const catalog = list.map((a) => `- ${a.name}: ${a.frontmatter.description}`).join("\n");
-    return [header, "", "Available subagent types:", catalog, "", trailer].join("\n");
+    this.description =
+      list.length === 0
+        ? [header, "", trailer].join("\n")
+        : [
+            header,
+            "",
+            "Available subagent types:",
+            list.map((a) => `- ${a.name}: ${a.frontmatter.description}`).join("\n"),
+            "",
+            trailer,
+          ].join("\n");
   }
 
   validate(raw: Record<string, unknown>): SubagentInput {
@@ -102,10 +112,14 @@ export class SubagentTool implements Tool<SubagentInput> {
     // built-in default agent runs. Also accept Claude's "general-purpose"
     // alias for the same reason (model habit, not promised API).
     const requested = input.subagent_type?.trim() ?? "";
+    // Alias "general-purpose" to the built-in default only when no disk agent
+    // claims that name — a real agent of that name must win. Lookup is
+    // case-insensitive to match the registry.
+    const aliasGeneralPurpose =
+      requested.toLowerCase() === "general-purpose" &&
+      this.opts.registry.get("general-purpose") === undefined;
     const subagentType =
-      requested === "" || requested === "general-purpose"
-        ? DEFAULT_AGENT_TYPE
-        : requested;
+      requested === "" || aliasGeneralPurpose ? DEFAULT_AGENT_TYPE : requested;
     const definition = this.opts.registry.get(subagentType);
     if (!definition) {
       const available = this.opts.registry.list().map((a) => a.name);

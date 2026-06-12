@@ -86,4 +86,54 @@ describe("substituteSkillBody", () => {
     const b = substituteSkillBody({ skill, args: "you", sessionId: "sid" });
     expect(a).toBe(b);
   });
+
+  // --- single-pass guarantees (no replacement is re-scanned) ---
+
+  it("does not let one slot clobber the prefix of another (single-pass)", () => {
+    // $file substituted first must not break $filename: both resolve independently.
+    const out = substituteSkillBody({
+      skill: mkSkill("open $filename with $file", ["file", "filename"]),
+      args: "vim notes.txt",
+      sessionId: "sid",
+    });
+    expect(out).toContain("open notes.txt with vim");
+  });
+
+  it("treats argument values as literals, not templates (no re-expansion)", () => {
+    // A value containing $b is inserted verbatim, not rewritten by the $b slot pass.
+    const out = substituteSkillBody({
+      skill: mkSkill("$a / $b", ["a", "b"]),
+      args: '"$b" second',
+      sessionId: "sid",
+    });
+    expect(out).toContain("$b / second");
+  });
+
+  it("inserts $ARGUMENTS in an argument value verbatim", () => {
+    const out = substituteSkillBody({
+      skill: mkSkill("[$a]", ["a"]),
+      args: '"$ARGUMENTS"',
+      sessionId: "sid",
+    });
+    expect(out).toContain("[$ARGUMENTS]");
+  });
+
+  it("does not let a slot prefix eat $ARGUMENTS (reserved consumed whole)", () => {
+    // A slot named ARGUMENT must not chew into $ARGUMENTS in the body.
+    const out = substituteSkillBody({
+      skill: mkSkill("slot=$ARGUMENT reserved=$ARGUMENTS", ["ARGUMENT"]),
+      args: "X",
+      sessionId: "sid",
+    });
+    expect(out).toContain("slot=X reserved=X");
+  });
+
+  it("leaves an unknown $name untouched", () => {
+    const out = substituteSkillBody({
+      skill: mkSkill("keep $unknown here", ["name"]),
+      args: "world",
+      sessionId: "sid",
+    });
+    expect(out).toContain("keep $unknown here");
+  });
 });

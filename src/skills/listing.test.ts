@@ -35,6 +35,16 @@ describe("buildSkillListing", () => {
     );
   });
 
+  it("collapses newlines in a block-scalar description to one line", () => {
+    // A YAML block scalar keeps embedded newlines; they must not split the
+    // one-line-per-skill listing (which could even fake extra catalog entries).
+    const out = buildSkillListing({
+      skills: [mkSkill("a", "line one\nline two\n  - fake entry")],
+    });
+    expect(out).toBe("- a: line one line two - fake entry");
+    expect(out.split("\n")).toHaveLength(1);
+  });
+
   it("caps per-entry description at 250 chars with a trailing …", () => {
     const longDesc = "x".repeat(500);
     const out = buildSkillListing({ skills: [mkSkill("a", longDesc)] });

@@ -46,7 +46,9 @@ function buildEntryDescription(s: Skill): string {
   let desc = s.frontmatter.description;
   if (s.frontmatter.whenToUse) desc += ` — ${s.frontmatter.whenToUse}`;
   if (s.frontmatter.argumentHint) desc += ` (args: ${s.frontmatter.argumentHint})`;
-  return desc;
+  // Collapse internal whitespace so a YAML block-scalar description (which keeps
+  // newlines) can't inject extra lines into the one-line-per-skill listing.
+  return desc.replace(/\s+/g, " ").trim();
 }
 
 function capDescription(desc: string, limit: number): string {

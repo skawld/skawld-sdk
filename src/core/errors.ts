@@ -81,3 +81,9 @@ export class SkillError extends SkawldError {
     this.skillName = opts?.skillName;
   }
 }
+
+/** A SessionStore contract violation (missing session, dangling task edge, …). */
+export class SessionStoreError extends SkawldError {
+  override readonly kind = "session_store";
+  override readonly retryable = false;
+}

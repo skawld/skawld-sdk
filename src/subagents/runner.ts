@@ -122,7 +122,7 @@ export async function runSubagent(args: RunSubagentArgs): Promise<RunSubagentRes
   const childInternal = getSessionInternals(childSession);
   childInternal.toolsOverride = childTools;
   childInternal.systemBlocksOverride = childSystemBlocks;
-  ai.sessions.set(childRecord.id, childInternal);
+  ai.registerSession(childRecord.id, childInternal);
 
   // Chain abort two ways: passing args.signal to Session.run covers
   // pre-abort/turn-boundary cases via anySignal; the listener covers

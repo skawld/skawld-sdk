@@ -16,6 +16,8 @@ export interface McpStdioServerConfig {
   args?: string[];
   /** Extra environment variables, merged over the inherited process env. */
   env?: Record<string, string>;
+  /** Per-call timeout in ms. Omit to use the SDK default (60s). */
+  timeoutMs?: number;
 }
 
 /** Connect to a remote MCP server over Streamable HTTP. */
@@ -25,6 +27,8 @@ export interface McpHttpServerConfig {
   url: string;
   /** Static headers sent with every request (e.g. Authorization). */
   headers?: Record<string, string>;
+  /** Per-call timeout in ms. Omit to use the SDK default (60s). */
+  timeoutMs?: number;
 }
 
 export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;

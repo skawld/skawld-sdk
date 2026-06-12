@@ -3,6 +3,7 @@ import path from "node:path";
 import fastGlob from "fast-glob";
 import type { Tool, ToolContext, ToolResult } from "./base.js";
 import { findExecutable, resolvePath, runRipgrep } from "./_helpers.js";
+import { loadGitignoreMatcher } from "./grep-fallback.js";
 import { ToolExecutionError } from "../core/errors.js";
 
 export interface GlobInput {
@@ -33,15 +34,23 @@ function staticBase(pattern: string): { base: string; rest: string } {
 }
 
 async function runGlobFallback(pattern: string, root: string): Promise<string[]> {
-  const entries = await fastGlob(pattern, {
+  // A slash-less pattern matches at any depth under rg's gitignore-glob semantics
+  // (e.g. "*.ts" finds nested files); fast-glob would otherwise match only the top level.
+  const effective = pattern.includes("/") ? pattern : `**/${pattern}`;
+  const entries = await fastGlob(effective, {
     cwd: root,
     dot: false,
     onlyFiles: true,
     followSymbolicLinks: false,
     ignore: VCS_IGNORE,
   });
-  return entries;
+  // rg --files honors .gitignore; mirror that so the fallback doesn't flood with ignored files.
+  const ig = await loadGitignoreMatcher(root);
+  return entries.filter((f) => !ig.ignores(f));
 }
+
+/** Test-only hook for the fallback path (the rg path is exercised in production). */
+export const runGlobFallbackForTest = runGlobFallback;
 
 async function sortByMtime(files: string[], root: string): Promise<string[]> {
   const stats = await Promise.all(
@@ -112,7 +121,7 @@ export class GlobTool implements Tool<GlobInput> {
         } else {
           files = result.output
             .split("\n")
-            .map((l) => l.trim())
+            .map((l) => l.replace(/\r$/, "")) // strip only CR; trimming would corrupt edge-whitespace names
             .filter(Boolean)
             .map((f) => (path.isAbsolute(f) ? path.relative(root, f) : f));
         }

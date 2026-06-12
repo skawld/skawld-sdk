@@ -42,11 +42,21 @@ function detectLineEnding(sample: string): "\r\n" | "\n" {
 }
 
 /**
- * Count occurrences of needle in haystack using split.
- * O(N) but allocates intermediate array — acceptable for files ≤ 100 MiB.
+ * Count occurrences of needle and locate the first, in one indexOf pass —
+ * no whole-file split allocation, and the single-edit path reuses firstIndex.
  */
-function countOccurrences(haystack: string, needle: string): number {
-  return haystack.split(needle).length - 1;
+function locateOccurrences(haystack: string, needle: string): { count: number; firstIndex: number } {
+  let count = 0;
+  let firstIndex = -1;
+  let from = 0;
+  for (;;) {
+    const idx = haystack.indexOf(needle, from);
+    if (idx === -1) break;
+    if (firstIndex === -1) firstIndex = idx;
+    count++;
+    from = idx + needle.length;
+  }
+  return { count, firstIndex };
 }
 
 export class EditTool implements Tool<EditInput> {
@@ -140,8 +150,8 @@ export class EditTool implements Tool<EditInput> {
       }
     }
 
-    // Step 7: Count occurrences.
-    const count = countOccurrences(text, needle);
+    // Step 7: Count occurrences (and locate the first for the single-edit splice).
+    const { count, firstIndex } = locateOccurrences(text, needle);
     if (count === 0) {
       return err("old_string not found in file.", input, this);
     }
@@ -153,12 +163,12 @@ export class EditTool implements Tool<EditInput> {
       );
     }
 
-    // Replace literally — split+join for replace_all, and a function replacement
-    // for the single case so `$$`, `$&`, `` $` `` etc. in new_string are written
+    // Replace literally — split+join for replace_all, and an index splice for the
+    // single case so `$$`, `$&`, `` $` `` etc. in new_string are written
     // byte-literal instead of being expanded as JS replacement patterns.
     const newText = input.replace_all
       ? text.split(needle).join(newString)
-      : text.replace(needle, () => newString);
+      : text.slice(0, firstIndex) + newString + text.slice(firstIndex + needle.length);
 
     // Step 8: Atomic write.
     try {

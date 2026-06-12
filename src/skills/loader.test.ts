@@ -104,6 +104,14 @@ describe("loadSkillsFromDir", () => {
     expect(skipped[0]!.reason).toBe("name-collision-skill");
   });
 
+  it("normalizes skill names to lowercase and dedupes case-insensitively", async () => {
+    const { skills, skipped } = await load("case-name");
+    // 'UpperName' loads as 'uppername'; 'Dup' and 'dup' collide post-normalization.
+    expect(skills.map((s) => s.name).sort()).toEqual(["dup", "uppername"]);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reason).toBe("name-collision-skill");
+  });
+
   it("allows an empty body", async () => {
     const { skills, skipped } = await load("empty-body");
     expect(skipped).toEqual([]);

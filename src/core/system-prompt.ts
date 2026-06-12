@@ -90,9 +90,13 @@ export function buildSystemBlocks(inp: SystemPromptInputs): SystemBlock[] {
 }
 
 export function buildEnvUserPrefix(): string {
+  // Local date — a UTC date shows tomorrow to users west of UTC every evening.
+  const d = new Date();
+  const localDate =
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   return `
 <env>
-Today's date: ${new Date().toISOString().slice(0, 10)}
+Today's date: ${localDate}
 </env>
 `.trim();
 }

@@ -59,7 +59,9 @@ export class SkillTool implements Tool<SkillInput> {
   }
 
   async execute(input: SkillInput, ctx: ToolContext): Promise<ToolResult> {
-    const requested = input.skill.startsWith("/") ? input.skill.slice(1) : input.skill;
+    const raw = input.skill.startsWith("/") ? input.skill.slice(1) : input.skill;
+    // Names are normalized to lowercase at load (the grammar is case-insensitive).
+    const requested = raw.toLowerCase();
     const skill = this.opts.skills.get(requested);
     if (!skill) {
       return {

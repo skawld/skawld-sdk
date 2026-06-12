@@ -23,10 +23,21 @@ function transformBlock(block: CallToolResult["content"][number]): SkawldContent
       };
     case "audio":
       return { type: "text", text: "[audio content omitted]" };
-    case "resource":
-      return { type: "text", text: "[resource content omitted]" };
-    default:
+    case "resource": {
+      const r = block.resource;
+      // Embedded text resources carry their content inline — surface it (with the
+      // URI as a header) instead of discarding it. Binary blobs stay omitted.
+      if ("text" in r && typeof r.text === "string") {
+        return { type: "text", text: `[resource ${r.uri}]\n${r.text}` };
+      }
+      return { type: "text", text: `[resource content omitted: ${r.uri}]` };
+    }
+    default: {
+      // resource_link (and any future block type): emit at least the URI.
+      const uri = (block as { uri?: unknown }).uri;
+      if (typeof uri === "string") return { type: "text", text: `[resource link: ${uri}]` };
       return { type: "text", text: "[unsupported content omitted]" };
+    }
   }
 }
 

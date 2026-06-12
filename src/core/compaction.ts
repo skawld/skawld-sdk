@@ -1,6 +1,6 @@
 /** Auto-compaction: default strategy and loop hooks. See docs/05-agent-loop.html#compaction. */
 
-import type { Message, ModelId } from "./types.js";
+import type { Message, ModelId, Usage } from "./types.js";
 import type { BaseProvider, ProviderRequest } from "../providers/base.js";
 import type { SessionInternal } from "./session.js";
 import type { AgentInternal } from "./agent.js";
@@ -11,6 +11,11 @@ export interface CompactionContext {
   provider: BaseProvider;
   model: ModelId;
   signal: AbortSignal;
+  /**
+   * Optional sink a strategy populates with the usage of any summarization call
+   * it makes, so the cost surfaces on CompactionEvent.summary_usage.
+   */
+  usageReport?: { usage?: Usage };
 }
 
 export interface CompactionStrategy {
@@ -103,7 +108,7 @@ export async function summarizeWithProvider(
   model: ModelId,
   older: Message[],
   signal: AbortSignal,
-): Promise<string> {
+): Promise<{ text: string; usage?: Usage }> {
   const req: ProviderRequest = {
     model,
     system: [{ type: "text", text: SUMMARY_PROMPT, cacheable: false }],
@@ -115,11 +120,15 @@ export async function summarizeWithProvider(
   };
 
   let text = "";
+  let usage: Usage | undefined;
   for await (const ev of provider.stream(req)) {
     if (ev.type === "text_delta") text += ev.text;
-    if (ev.type === "message_end") break;
+    if (ev.type === "message_end") {
+      usage = ev.usage;
+      break;
+    }
   }
-  return text.trim();
+  return { text: text.trim(), usage };
 }
 
 // ---------------------------------------------------------------------------
@@ -130,14 +139,15 @@ export async function summarizeWithProvider(
 export const defaultCompaction: CompactionStrategy = {
   id: "default-keep-recent-10",
 
-  async compact({ messages, provider, model, signal }: CompactionContext): Promise<Message[]> {
+  async compact({ messages, provider, model, signal, usageReport }: CompactionContext): Promise<Message[]> {
     const recent = lastNTurnBoundaries(messages, 10);
     const older = messages.slice(0, messages.length - recent.length);
 
     // No older content — nothing to compact
     if (older.length === 0) return messages;
 
-    const summaryText = await summarizeWithProvider(provider, model, older, signal);
+    const { text: summaryText, usage } = await summarizeWithProvider(provider, model, older, signal);
+    if (usageReport) usageReport.usage = usage;
 
     const summaryMessage: Message = {
       role: "user",
@@ -170,11 +180,13 @@ async function runCompactionImpl(
   const headBefore = si.providerView[0];
 
   // Pass a snapshot so a misbehaving custom strategy cannot mutate the live array.
+  const usageReport: { usage?: Usage } = {};
   const compacted = await strategy.compact({
     messages: si.providerView.slice(),
     provider,
     model,
     signal,
+    usageReport,
   });
 
   // Replace providerView in place — fullHistory is NOT touched
@@ -198,6 +210,7 @@ async function runCompactionImpl(
     tokens_before: before.tokens,
     tokens_after: 0,
     strategy: strategy.id,
+    ...(usageReport.usage ? { summary_usage: usageReport.usage } : {}),
   };
   return true;
 }
