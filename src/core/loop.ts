@@ -1,10 +1,10 @@
 /** Model-to-tool orchestration loop. See docs/05-agent-loop.html#loop. */
 
 import { anySignal, throwIfAborted } from "./abort.js";
-import { AbortError, ContextLengthError } from "./errors.js";
+import { AbortError, ContextLengthError, HookError } from "./errors.js";
 import { buildEnvUserPrefix } from "./system-prompt.js";
 import { getAgentInternals } from "./agent.js";
-import { getSessionInternals } from "./session.js";
+import { getSessionInternals, rejectSteeringQueue } from "./session.js";
 import { maybeCompact, runForcedCompaction } from "./compaction.js";
 import { executeToolCalls } from "./scheduler.js";
 import type { Event, PartialAssistantEvent, CompactionEvent, HookErrorEvent } from "./events.js";
@@ -66,6 +66,23 @@ function buildUserMessage(
   if (skillListingText) content.push(skillListingBlock(skillListingText));
   content.push(envBlock, promptBlock, ...contextBlocks, ...imageBlocks);
   return { role: "user", content };
+}
+
+// A steering message is a plain user message: the prompt text, any
+// UserPromptSubmit additionalContext (system-reminder blocks), then images.
+// Deliberately NO env prefix and NO skill listing — those are per-run framing
+// already present in the history.
+function buildSteeringMessage(
+  prompt: string,
+  images?: RunOptions["images"],
+  additionalContext?: string[],
+): Message {
+  const promptBlock: TextBlock = { type: "text", text: prompt };
+  const contextBlocks: TextBlock[] = (additionalContext ?? []).map(
+    (text) => ({ type: "text", text: wrapInSystemReminder(text) }),
+  );
+  const imageBlocks: ImageBlock[] = (images ?? []).map(toImageBlock);
+  return { role: "user", content: [promptBlock, ...contextBlocks, ...imageBlocks] };
 }
 
 function toImageBlock(img: { data: string; mediaType: string } | { url: string }): ImageBlock {
@@ -133,6 +150,42 @@ function reinjectSkillContext(si: SessionInternal, ai: AgentInternal): void {
       role: "user",
       content: [{ type: "text", text: wrapInSystemReminder(rec.substitutedBody) }],
     });
+  }
+}
+
+// Drain the steering queue at a turn boundary (module 15). For each queued
+// message, in FIFO order: run the UserPromptSubmit hooks with source "steer"
+// (a block rejects only that entry's promise with HookError and skips it,
+// remaining entries still inject), then append a plain user message and emit a
+// UserEvent with subtype "steering", and resolve the entry's promise. Entries
+// enqueued while draining (during an await) are picked up by the same loop.
+async function* drainSteeringQueue(
+  si: SessionInternal,
+  ai: AgentInternal,
+  hookCtx: () => HookContext,
+): AsyncGenerator<Event> {
+  while (si.steeringQueue.length > 0) {
+    const entry = si.steeringQueue.shift()!;
+    let additionalContext: string[] | undefined;
+    if (ai.hookRunner.hasUserPromptSubmit) {
+      const res = await ai.hookRunner.runUserPromptSubmit({
+        prompt: entry.prompt,
+        source: "steer",
+        ctx: hookCtx(),
+      });
+      for (const e of res.errors) yield e;
+      if (res.blocked) {
+        // Block drops only this message: reject its promise, no ErrorEvent,
+        // remaining queued messages still inject.
+        entry.reject(new HookError(res.blocked.reason));
+        continue;
+      }
+      additionalContext = res.additionalContext;
+    }
+    const msg = buildSteeringMessage(entry.prompt, entry.images, additionalContext);
+    await si.append([msg]);
+    yield { type: "user", message: msg, subtype: "steering" };
+    entry.resolve();
   }
 }
 
@@ -388,13 +441,30 @@ export async function* runLoop(
     // surfaces as ErrorEvent + ResultEvent(error) rather than throwing raw.
     const userMsg = buildUserMessage(prompt, opts.images, listingForFirstTurn, promptContext);
     await si.append([userMsg]);
-    yield { type: "user", message: userMsg };
+    yield { type: "user", message: userMsg, subtype: "prompt" };
 
     // maxTurns defaults to Infinity (unbounded): the loop runs until the model
     // stops calling tools, or the run aborts/errors. A finite maxTurns caps it
     // and falls through to the TurnLimitError below.
     for (let turn = 0; turn < ai.maxTurns; turn++) {
       throwIfAborted(signal);
+
+      // Top-of-turn checkpoint (module 15), before maybeCompact and the provider
+      // call. Interrupt wins over steering here: reject pending steers and end
+      // the run. Otherwise drain any queued steering messages so they are part
+      // of both the compaction projection and the next request.
+      if (si.interruptRequested) {
+        rejectSteeringQueue(si);
+        yield {
+          type: "result",
+          subtype: "interrupted",
+          stop_reason: "error",
+          total_usage: totalUsage,
+          duration_ms: Date.now() - startedAt,
+        };
+        return;
+      }
+      yield* drainSteeringQueue(si, ai, hookCtx);
 
       // Reset compaction retry flag at the top of every turn
       si.compactionRetryUsedThisTurn = false;
@@ -430,12 +500,34 @@ export async function* runLoop(
         if (stopReason !== "tool_use") {
           const finalText = extractFinalText(assistantMessage);
 
-          // Stop boundary. Module 15 inserts steering drain + interrupt check
-          // here, BEFORE the Stop hooks. Stop hooks fire only for top-level runs
-          // on the success path. A block appends a system-reminder user message
-          // and continues the loop (the continuation counts toward maxTurns).
-          // Fail-open. WARNING: a hook that unconditionally blocks loops forever
-          // under the default maxTurns: Infinity — use stop_hook_active to bound.
+          // Stop boundary, normative ordering (module 15):
+          // 1. Steering queued? Drain and continue — the model ended its answer
+          //    but the user already said more. Stop hooks do NOT fire here; the
+          //    continuation counts toward maxTurns.
+          if (si.steeringQueue.length > 0) {
+            yield* drainSteeringQueue(si, ai, hookCtx);
+            continue;
+          }
+          // 2. Interrupt requested but the model already finished — the run was
+          //    ending anyway, so emit the normal success result (which carries
+          //    strictly more information than "interrupted").
+          if (si.interruptRequested) {
+            yield {
+              type: "result",
+              subtype: "success",
+              stop_reason: stopReason,
+              total_usage: totalUsage,
+              duration_ms: Date.now() - startedAt,
+              final_text: finalText,
+            };
+            return;
+          }
+
+          // 3. Stop hooks fire only for top-level runs on the success path. A
+          // block appends a system-reminder user message and continues the loop
+          // (the continuation counts toward maxTurns). Fail-open. WARNING: a hook
+          // that unconditionally blocks loops forever under the default
+          // maxTurns: Infinity — use stop_hook_active to bound.
           if (si.toolsOverride === undefined && ai.hookRunner.hasStop) {
             const res = await ai.hookRunner.runStop({
               stopReason,
@@ -477,7 +569,7 @@ export async function* runLoop(
           content: resultBlocks,
         };
         await si.append([userResultMsg]);
-        yield { type: "user", message: userResultMsg };
+        yield { type: "user", message: userResultMsg, subtype: "tool_result" };
       } finally {
         si.currentTurnAllowedTools = undefined;
       }

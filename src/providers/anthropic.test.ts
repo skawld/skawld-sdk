@@ -975,3 +975,30 @@ describe("redacted_thinking round-trip (D6)", () => {
     expect(translated[0]?.content[1]?.type).toBe("tool_use");
   });
 });
+
+// Steering (module 15) appends a user message after a tool-result user message,
+// producing two consecutive user messages. The Anthropic adapter must preserve
+// both as separate user-role entries.
+describe("translateMessages — consecutive user messages (steering)", () => {
+  it("preserves two back-to-back user messages as separate entries", () => {
+    const translated = translateMessages([
+      { role: "user", content: [{ type: "text", text: "first" }] },
+      { role: "user", content: [{ type: "text", text: "steered" }] },
+    ]);
+    expect(translated).toHaveLength(2);
+    expect(translated[0]?.role).toBe("user");
+    expect(translated[1]?.role).toBe("user");
+    expect(translated[1]?.content[0]).toEqual({ type: "text", text: "steered" });
+  });
+
+  it("never splices a user message between tool_use and its tool_result", () => {
+    const translated = translateMessages([
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Write", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+      { role: "user", content: [{ type: "text", text: "also do X" }] },
+    ]);
+    expect(translated.map((m) => m.role)).toEqual(["assistant", "user", "user"]);
+    expect(translated[1]?.content[0]?.type).toBe("tool_result");
+    expect(translated[2]?.content[0]).toEqual({ type: "text", text: "also do X" });
+  });
+});

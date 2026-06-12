@@ -761,3 +761,32 @@ describe("abort-aware error mapping (D1)", () => {
     ).rejects.toBeInstanceOf(ProviderError);
   });
 });
+
+// Steering (module 15) appends a user message after a tool-result user message.
+// In the Responses API a tool_result becomes a function_call_output item and the
+// steering text an input message — both accepted, no splicing failure.
+describe("translateInput — consecutive user messages (steering)", () => {
+  it("preserves two back-to-back text user messages as separate message items", () => {
+    const out = translateInput([
+      { role: "user", content: [{ type: "text", text: "first" }] },
+      { role: "user", content: [{ type: "text", text: "steered" }] },
+    ]);
+    const messages = out.filter((i) => (i as { type: string }).type === "message");
+    expect(messages).toHaveLength(2);
+    expect((messages[1] as { content: Array<{ text: string }> }).content[0]?.text).toBe("steered");
+  });
+
+  it("maps tool_result then a steering user message to output + message items", () => {
+    const out = translateInput([
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Write", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+      { role: "user", content: [{ type: "text", text: "also do X" }] },
+    ]);
+    expect(out.map((i) => (i as { type: string }).type)).toEqual([
+      "function_call",
+      "function_call_output",
+      "message",
+    ]);
+    expect((out[2] as { role: string }).role).toBe("user");
+  });
+});

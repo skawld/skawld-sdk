@@ -606,3 +606,28 @@ describe("abort-aware error mapping (D1)", () => {
     ).rejects.toBeInstanceOf(ProviderError);
   });
 });
+
+// Steering (module 15) appends a user message after a tool-result user message.
+// In Chat Completions a tool_result becomes a role:"tool" message and the
+// steering text a role:"user" message — both accepted, no splicing failure.
+describe("translateMessages — consecutive user messages (steering)", () => {
+  it("preserves two back-to-back text user messages as separate entries", () => {
+    const out = translateMessages([
+      { role: "user", content: [{ type: "text", text: "first" }] },
+      { role: "user", content: [{ type: "text", text: "steered" }] },
+    ]);
+    expect(out).toHaveLength(2);
+    expect(out.every((m) => m.role === "user")).toBe(true);
+    expect((out[1] as { content: string }).content).toBe("steered");
+  });
+
+  it("maps tool_result then a steering user message to tool + user entries", () => {
+    const out = translateMessages([
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Write", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+      { role: "user", content: [{ type: "text", text: "also do X" }] },
+    ]);
+    expect(out.map((m) => m.role)).toEqual(["assistant", "tool", "user"]);
+    expect((out[2] as { content: string }).content).toBe("also do X");
+  });
+});

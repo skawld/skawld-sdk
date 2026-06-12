@@ -41,11 +41,13 @@ export interface UserEvent {
   type: "user";
   message: Message;
   /**
-   * Optional provenance of the user message. Omitted on plain phase-1 user
-   * events. `"stop_hook"` marks the system-reminder message a blocking Stop hook
-   * appended; `"steering"` is emitted by module 15.
+   * Optional provenance of the user message. The loop sets it at every emission
+   * site: `"prompt"` = the run's opening message; `"tool_result"` = aggregated
+   * tool results; `"steering"` = injected via `Session.steer()`; `"stop_hook"` =
+   * the system-reminder message a blocking Stop hook appended. The field stays
+   * optional so phase-1 consumers compile unchanged.
    */
-  subtype?: "steering" | "stop_hook";
+  subtype?: "prompt" | "tool_result" | "steering" | "stop_hook";
 }
 
 export interface PartialAssistantEvent {
@@ -109,7 +111,7 @@ export interface CompactionEvent {
 
 export interface ResultEvent {
   type: "result";
-  subtype: "success" | "aborted" | "error";
+  subtype: "success" | "aborted" | "error" | "interrupted";
   stop_reason: StopReason;
   total_usage: Usage;
   duration_ms: number;

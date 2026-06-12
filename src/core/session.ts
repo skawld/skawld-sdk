@@ -1,6 +1,6 @@
 /** Session class. See docs/05-agent-loop.html#session. */
 
-import { ConfigError } from "./errors.js";
+import { AbortError, ConfigError } from "./errors.js";
 import { FileReadTracker } from "../tools/file-tracker.js";
 import { runLoop } from "./loop.js";
 import type { Agent } from "./agent.js";
@@ -57,6 +57,23 @@ export interface SessionInternal {
   /** Set by runLoop when it starts; null when idle. */
   activeRunId: string | null;
   /**
+   * FIFO of user messages queued via Session.steer() for injection into the
+   * active run. Drained by the loop at turn boundaries; entries still pending
+   * when the run ends are rejected with AbortError (see rejectSteeringQueue).
+   */
+  steeringQueue: Array<{
+    prompt: string;
+    images?: RunOptions["images"];
+    resolve: () => void;
+    reject: (err: unknown) => void;
+  }>;
+  /**
+   * Set by Session.interrupt(); reset at the start of each run (same pattern as
+   * internalController) so an interrupt against an idle session never poisons
+   * the next run. Checked at the top of each turn by the loop.
+   */
+  interruptRequested: boolean;
+  /**
    * Optional per-session tool registry override. When set, the loop and the
    * scheduler resolve tools through this registry instead of `agent.tools`.
    * Used by the subagent runner to give the child Session a filtered view of
@@ -106,6 +123,19 @@ export function getSessionInternals(session: Session): SessionInternal {
   const internals = sessionInternals.get(session);
   if (!internals) throw new Error("Session internals not found");
   return internals;
+}
+
+/**
+ * Reject every still-pending steering promise with AbortError and empty the
+ * queue (in place, preserving array identity). Called by the loop's interrupt
+ * checkpoint and by run cleanup so an ended/abandoned run never leaks unsettled
+ * steer() promises. Idempotent: a no-op when the queue is already empty.
+ */
+export function rejectSteeringQueue(internal: SessionInternal): void {
+  const pending = internal.steeringQueue.splice(0);
+  for (const entry of pending) {
+    entry.reject(new AbortError("Run ended before steering message was injected"));
+  }
 }
 
 interface SessionConstructorArgs {
@@ -201,6 +231,8 @@ export class Session {
       // the start of each run so aborting between runs never pre-poisons the next.
       internalController: new AbortController(),
       activeRunId: null,
+      steeringQueue: [],
+      interruptRequested: false,
       async append(messages: Message[]): Promise<void> {
         await store.appendMessages(record.id, messages);
         for (const m of messages) {
@@ -235,6 +267,9 @@ export class Session {
     // Fresh controller per run — ensures that a prior abort() or completion
     // never pre-poisons subsequent runs.
     internal.internalController = new AbortController();
+    // Same reasoning for the interrupt flag: a stale interrupt() from a prior
+    // run must not poison this one.
+    internal.interruptRequested = false;
 
     // Mark as pending synchronously; runLoop will replace with actual runId.
     internal.activeRunId = "pending";
@@ -249,6 +284,9 @@ export class Session {
       internal.activeRunId = null;
       internal.currentThinking = undefined;
       internal.currentEffort = undefined;
+      // Reject any steering messages still queued when the run ends or the
+      // iterator is abandoned, so steer() promises never leak unsettled.
+      rejectSteeringQueue(internal);
     });
   }
 
@@ -260,6 +298,37 @@ export class Session {
    */
   abort(reason?: unknown): void {
     sessionInternals.get(this)!.internalController.abort(reason);
+  }
+
+  /**
+   * Queue a user message for injection into the active run, drained at the next
+   * turn boundary as a real persisted user message. Multiple calls queue FIFO.
+   *
+   * Throws ConfigError synchronously when no run is active. The returned promise
+   * resolves once the message has been appended and its UserEvent emitted; it
+   * rejects with AbortError if the run ends (abort / interrupt / error / turn
+   * limit) before injection, or with HookError if a UserPromptSubmit hook blocks
+   * this specific message. Rejections never crash the run.
+   */
+  steer(prompt: string, opts: { images?: RunOptions["images"] } = {}): Promise<void> {
+    const internal = sessionInternals.get(this)!;
+    if (internal.activeRunId === null) {
+      throw new ConfigError("No active run to steer");
+    }
+    return new Promise<void>((resolve, reject) => {
+      internal.steeringQueue.push({ prompt, images: opts.images, resolve, reject });
+    });
+  }
+
+  /**
+   * Request a graceful stop of the active run. Idempotent; a no-op when idle.
+   * The current turn and its tool calls complete and persist; the run then ends
+   * with ResultEvent subtype "interrupted" instead of starting another model
+   * turn. Does not touch an in-flight stream — abort() remains the only
+   * immediate mechanism.
+   */
+  interrupt(): void {
+    sessionInternals.get(this)!.interruptRequested = true;
   }
 
   /** Update metadata in the store (shallow merge). */
