@@ -20,6 +20,7 @@ import {
   type ProviderStreamEvent,
   type SystemBlock,
 } from "./base.js";
+import { AbortError } from "../core/errors.js";
 import type { OpenAIChatProviderOptions } from "./openai-chat.js";
 import { mapOpenAIError } from "./openai-errors.js";
 import { withRetryableStream } from "./retry.js";
@@ -314,8 +315,12 @@ export function buildPayload(
     if (opts.effort !== undefined) payload.reasoning.effort = opts.effort;
     if (opts.summary !== undefined) payload.reasoning.summary = opts.summary;
   }
+  // Reasoning models reason even without an explicit reasoning config, so
+  // stateless multi-turn tool use must replay reasoning items with their
+  // encrypted_content or the API rejects them. Default the include on for
+  // stateless requests unless the caller explicitly opts out.
   const statelessReasoning =
-    opts.previousResponseId === "disabled" && (opts.encryptedContent ?? hasReasoningConfig(opts));
+    opts.previousResponseId === "disabled" && (opts.encryptedContent ?? true);
   if (statelessReasoning) payload.include = ["reasoning.encrypted_content"];
   return payload;
 }
@@ -415,6 +420,13 @@ export async function* mapWireEvents(
         break;
       }
       case "response.output_text.delta": {
+        const e = ev as { delta?: string };
+        if (e.delta) yield { type: "text_delta", text: e.delta };
+        break;
+      }
+      case "response.refusal.delta": {
+        // Surface refusal text as assistant text so consumers see why nothing
+        // else came back, instead of an empty end_turn turn.
         const e = ev as { delta?: string };
         if (e.delta) yield { type: "text_delta", text: e.delta };
         break;
@@ -634,6 +646,10 @@ export class OpenAIResponsesProvider extends BaseProvider {
     try {
       yield* mapWireEvents(wire, req.model);
     } catch (err) {
+      // A user abort mid-stream arrives as an SDK error whose name/status don't
+      // identify it; check the request signal so a clean cancel maps to
+      // AbortError, not a retryable ProviderError.
+      if (req.signal.aborted) throw new AbortError("request aborted", { cause: err });
       throw mapOpenAIError(err);
     } finally {
       wire.controller?.abort?.();

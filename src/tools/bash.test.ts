@@ -128,6 +128,24 @@ describe("BashTool", () => {
       expect(result.content).toContain("200");
     });
 
+    it.skipIf(isWindows)("timeout result includes captured partial output (E10)", async () => {
+      const result = await tool.execute(
+        tool.validate({ command: "echo partial-out; sleep 5", timeout_ms: 300 }),
+        makeCtx(),
+      );
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain("partial-out");
+      expect(result.content).toMatch(/timed out/i);
+    });
+
+    it.skipIf(isWindows)("reports the signal name when the process dies by signal (E10)", async () => {
+      const result = await tool.execute(
+        tool.validate({ command: "kill -TERM $$" }),
+        makeCtx(),
+      );
+      expect(result.content).toMatch(/exit: signal SIGTERM/);
+    });
+
     it("abort via signal → is_error: true, message mentions abort", async () => {
       const controller = new AbortController();
       const promise = tool.execute(

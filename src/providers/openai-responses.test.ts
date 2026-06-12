@@ -581,7 +581,7 @@ describe("OpenAIResponsesProvider", () => {
   });
 });
 
-import { ProviderError, RateLimitError } from "../core/errors.js";
+import { AbortError, ProviderError, RateLimitError } from "../core/errors.js";
 
 // Retry of the initial connection (429/5xx/network) is managed by Skawld so
 // all providers share the same backoff semantics. The SDK retry budget stays
@@ -687,5 +687,77 @@ describe("OpenAIResponsesProvider — max_retries", () => {
       })(),
     ).rejects.toBeInstanceOf(ProviderError);
     expect(opens).toBe(1);
+  });
+});
+
+describe("refusal mapping (D7)", () => {
+  it("surfaces a streamed refusal as assistant text", async () => {
+    const events: unknown[] = [
+      { type: "response.refusal.delta", delta: "I can't help with that." },
+      {
+        type: "response.completed",
+        response: { id: "r1", status: "completed", output: [] },
+      },
+    ];
+    const out = await collect(mapWireEvents(fromArray(events), "m"));
+    expect(out).toContainEqual({ type: "text_delta", text: "I can't help with that." });
+  });
+});
+
+describe("stateless encrypted-reasoning include (D8)", () => {
+  it("includes reasoning.encrypted_content for stateless requests by default", () => {
+    const payload = buildPayload(req(), { previousResponseId: "disabled" });
+    expect(payload.include).toEqual(["reasoning.encrypted_content"]);
+  });
+
+  it("omits the include when the caller explicitly disables encrypted content", () => {
+    const payload = buildPayload(req(), {
+      previousResponseId: "disabled",
+      encryptedContent: false,
+    });
+    expect(payload.include).toBeUndefined();
+  });
+
+  it("omits the include for stateful (auto) requests", () => {
+    const payload = buildPayload(req(), { previousResponseId: "auto" });
+    expect(payload.include).toBeUndefined();
+  });
+});
+
+describe("abort-aware error mapping (D1)", () => {
+  it("maps a mid-stream failure to AbortError when the signal is aborted", async () => {
+    const ctrl = new AbortController();
+    class AbortingProvider extends OpenAIResponsesProvider {
+      override openStream() {
+        const iter = (async function* (): AsyncGenerator<never> {
+          ctrl.abort();
+          throw new Error("Request was aborted.");
+        })();
+        return Object.assign(iter, { controller: undefined });
+      }
+    }
+    const p = new AbortingProvider({ apiKey: "x" });
+    await expect(
+      (async () => {
+        for await (const _ev of p.stream(req({ signal: ctrl.signal, max_retries: 0 }))) void _ev;
+      })(),
+    ).rejects.toBeInstanceOf(AbortError);
+  });
+
+  it("maps the same error shape to a retryable ProviderError when not aborted", async () => {
+    class ResetProvider extends OpenAIResponsesProvider {
+      override openStream() {
+        const iter = (async function* (): AsyncGenerator<never> {
+          throw new Error("Connection reset.");
+        })();
+        return Object.assign(iter, { controller: undefined });
+      }
+    }
+    const p = new ResetProvider({ apiKey: "x" });
+    await expect(
+      (async () => {
+        for await (const _ev of p.stream(req({ max_retries: 0 }))) void _ev;
+      })(),
+    ).rejects.toBeInstanceOf(ProviderError);
   });
 });

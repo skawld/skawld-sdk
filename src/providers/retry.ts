@@ -53,13 +53,20 @@ function isRetryable(err: unknown): boolean {
   return err instanceof SkawldError && err.retryable;
 }
 
+// Server-specified Retry-After is honored up to a higher cap than the backoff
+// cap; clamping a long Retry-After down would just guarantee another 429 and
+// burn an attempt. Beyond this cap, fail fast with the rate-limit error.
+const RETRY_AFTER_MAX_MS = 120_000;
+
 function computeDelay(
   err: unknown,
   attempt: number,
   opts: ResolvedRetryOptions,
 ): number {
   if (err instanceof RateLimitError && err.retry_after_seconds !== undefined) {
-    return Math.min(err.retry_after_seconds * 1000, opts.maxDelayMs);
+    const requested = err.retry_after_seconds * 1000;
+    if (requested > RETRY_AFTER_MAX_MS) throw err;
+    return Math.max(0, requested);
   }
   const exp = opts.baseDelayMs * 2 ** attempt;
   const capped = Math.min(exp, opts.maxDelayMs);

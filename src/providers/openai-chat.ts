@@ -23,6 +23,7 @@ import {
   type ProviderStreamEvent,
   type SystemBlock,
 } from "./base.js";
+import { AbortError } from "../core/errors.js";
 import { mapOpenAIError } from "./openai-errors.js";
 import { withRetryableStream } from "./retry.js";
 
@@ -98,7 +99,9 @@ export interface ChatRequestPayload {
   model: ModelId;
   messages: ChatMessage[];
   tools?: ChatFunctionTool[];
-  max_tokens?: number;
+  // `max_completion_tokens` supersedes the deprecated `max_tokens`, which
+  // reasoning models (o-series/gpt-5) reject outright.
+  max_completion_tokens?: number;
   temperature?: number;
   stop?: string[];
   stream: true;
@@ -241,8 +244,8 @@ export function buildPayload(req: ProviderRequest): ChatRequestPayload {
     stream: true,
     stream_options: { include_usage: true },
   };
-  // Omit `max_tokens` when unspecified so the model's API default applies.
-  if (req.max_output_tokens !== undefined) payload.max_tokens = req.max_output_tokens;
+  // Omit `max_completion_tokens` when unspecified so the model's API default applies.
+  if (req.max_output_tokens !== undefined) payload.max_completion_tokens = req.max_output_tokens;
   if (req.tools.length > 0) payload.tools = translateTools(req.tools);
   if (req.temperature !== undefined) payload.temperature = req.temperature;
   if (req.stop_sequences !== undefined) payload.stop = req.stop_sequences;
@@ -276,6 +279,20 @@ interface ToolCallSlot {
   id: string;
   name: string;
   emittedStart: boolean;
+  /** Argument fragments received before id+name completed, flushed on start. */
+  pendingArgs: string;
+}
+
+interface WireToolCallDelta {
+  index: number;
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+interface WireChoiceDelta {
+  content?: string | null;
+  refusal?: string | null;
+  tool_calls?: WireToolCallDelta[];
 }
 
 function buildUsage(u: WireUsage | undefined): Usage {
@@ -301,14 +318,7 @@ export async function* mapWireEvents(
   for await (const raw of wire) {
     const chunk = raw as {
       choices?: Array<{
-        delta?: {
-          content?: string | null;
-          tool_calls?: Array<{
-            index: number;
-            id?: string;
-            function?: { name?: string; arguments?: string };
-          }>;
-        };
+        delta?: WireChoiceDelta;
         finish_reason?: string | null;
       }>;
       usage?: WireUsage;
@@ -324,43 +334,34 @@ export async function* mapWireEvents(
       if (typeof delta.content === "string" && delta.content.length > 0) {
         yield { type: "text_delta", text: delta.content };
       }
+      // Surface refusal text as assistant text so consumers see why nothing
+      // else came back, instead of an empty end_turn turn.
+      if (typeof delta.refusal === "string" && delta.refusal.length > 0) {
+        yield { type: "text_delta", text: delta.refusal };
+      }
       if (delta.tool_calls) {
         for (const tc of delta.tool_calls) {
           let slot = slots.get(tc.index);
           if (!slot) {
-            // Buffer until we have id+name to emit start.
-            if (tc.id && tc.function?.name) {
-              slot = { id: tc.id, name: tc.function.name, emittedStart: true };
-              slots.set(tc.index, slot);
-              yield { type: "tool_use_start", id: slot.id, name: slot.name };
-              if (tc.function.arguments) {
-                yield {
-                  type: "tool_use_input_delta",
-                  id: slot.id,
-                  json_delta: tc.function.arguments,
-                };
-              }
-            } else {
-              // hold partial info until id+name arrive
-              slot = {
-                id: tc.id ?? "",
-                name: tc.function?.name ?? "",
-                emittedStart: false,
-              };
-              slots.set(tc.index, slot);
-            }
-            continue;
+            slot = { id: "", name: "", emittedStart: false, pendingArgs: "" };
+            slots.set(tc.index, slot);
           }
-          // Existing slot: maybe finally got id/name to emit start.
           if (!slot.emittedStart) {
             if (tc.id) slot.id = tc.id;
             if (tc.function?.name) slot.name = tc.function.name;
             if (slot.id && slot.name) {
               slot.emittedStart = true;
               yield { type: "tool_use_start", id: slot.id, name: slot.name };
+              // Flush any fragments buffered before the slot was complete.
+              const args = slot.pendingArgs + (tc.function?.arguments ?? "");
+              slot.pendingArgs = "";
+              if (args) {
+                yield { type: "tool_use_input_delta", id: slot.id, json_delta: args };
+              }
+            } else if (tc.function?.arguments) {
+              slot.pendingArgs += tc.function.arguments;
             }
-          }
-          if (slot.emittedStart && tc.function?.arguments) {
+          } else if (tc.function?.arguments) {
             yield {
               type: "tool_use_input_delta",
               id: slot.id,
@@ -460,6 +461,10 @@ export class OpenAIChatCompletionsProvider extends BaseProvider {
     try {
       yield* mapWireEvents(wire, req.model);
     } catch (err) {
+      // A user abort mid-stream arrives as an SDK error whose name/status don't
+      // identify it; check the request signal so a clean cancel maps to
+      // AbortError, not a retryable ProviderError.
+      if (req.signal.aborted) throw new AbortError("request aborted", { cause: err });
       throw mapOpenAIError(err);
     } finally {
       wire.controller?.abort?.();

@@ -11,6 +11,14 @@ export interface MessageProviderMetadata {
     response_id?: string;
     output_items?: Array<Record<string, unknown>>;
   };
+  anthropic?: {
+    /**
+     * Raw redacted_thinking blocks captured from the stream. They never surface
+     * as ContentBlocks but must be replayed verbatim before tool_use in the
+     * next request, or the API rejects the turn.
+     */
+    redacted_thinking?: Array<{ type: "redacted_thinking"; data: string }>;
+  };
 }
 
 export type ContentBlock =

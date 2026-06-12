@@ -73,6 +73,11 @@ const CORPUS: Record<string, string> = {
     "Some notes about the project.",
     "See src/ for implementation.",
   ].join("\n"),
+  "src/arrow.ts": [
+    "const f = () => 1;",
+    "// pointer->field access",
+    "run --flag value",
+  ].join("\n"),
 };
 
 beforeAll(async () => {
@@ -112,7 +117,8 @@ function buildRgArgs(input: GrepInput, searchRoot: string): string[] {
   }
   if (input.glob) args.push("--glob", input.glob);
   if (input.type) args.push("--type", input.type);
-  args.push(input.pattern, searchRoot);
+  // Pass the pattern via -e so leading-dash patterns aren't parsed as flags.
+  args.push("-e", input.pattern, searchRoot);
   return args;
 }
 
@@ -217,5 +223,16 @@ describe("Grep fallback equivalence", () => {
     const fb = stripSep(await fbLines("TODO", { output_mode: "content", "-n": true, "-C": 1 }));
     const rg = stripSep(await rgLines("TODO", { output_mode: "content", "-n": true, "-C": 1 }));
     expect(fb).toEqual(rg);
+  });
+
+  // E2: patterns beginning with '-' must work (passed via -e), matching the
+  // fallback. Without -e, rg would reject "->" / "--flag" as unknown flags.
+  it.skipIf(!hasRg)("S13: leading-dash pattern '->' (content)", async () => {
+    expect(await fbLines("->", { output_mode: "content" }))
+      .toEqual(await rgLines("->", { output_mode: "content" }));
+  });
+
+  it.skipIf(!hasRg)("S14: leading-dash pattern '--flag' (files_with_matches)", async () => {
+    expect(await fbLines("--flag")).toEqual(await rgLines("--flag"));
   });
 });

@@ -113,6 +113,11 @@ interface AnthropicThinkingContent {
   signature?: string;
 }
 
+interface AnthropicRedactedThinkingContent {
+  type: "redacted_thinking";
+  data: string;
+}
+
 interface AnthropicImageContent extends CacheControl {
   type: "image";
   source:
@@ -125,6 +130,7 @@ type AnthropicContent =
   | AnthropicToolUseContent
   | AnthropicToolResultContent
   | AnthropicThinkingContent
+  | AnthropicRedactedThinkingContent
   | AnthropicImageContent;
 
 interface AnthropicMessage {
@@ -229,10 +235,26 @@ function translateContent(block: ContentBlock): AnthropicContent {
 }
 
 export function translateMessages(messages: Message[]): AnthropicMessage[] {
-  return messages.map((m) => ({
-    role: m.role,
-    content: m.content.map(translateContent),
-  }));
+  return messages.map((m) => {
+    const content = m.content.map(translateContent);
+    // Redacted thinking blocks are opaque and never surface as ContentBlocks,
+    // but the API requires them replayed verbatim ahead of the turn's other
+    // content (thinking precedes tool_use). Re-inject from provider metadata.
+    const redacted = m.provider_metadata?.anthropic?.redacted_thinking;
+    if (m.role === "assistant" && redacted && redacted.length > 0) {
+      return {
+        role: m.role,
+        content: [
+          ...redacted.map((r): AnthropicRedactedThinkingContent => ({
+            type: "redacted_thinking",
+            data: r.data,
+          })),
+          ...content,
+        ],
+      };
+    }
+    return { role: m.role, content };
+  });
 }
 
 /**
@@ -252,8 +274,15 @@ export function applyConversationCacheBreakpoint(
   if (!last || last.role !== "user" || last.content.length === 0) return;
   const block = last.content[last.content.length - 1];
   if (!block) return;
-  // thinking and tool_use blocks don't support cache_control; the rest do.
-  if (block.type === "thinking" || block.type === "tool_use") return;
+  // thinking/redacted_thinking and tool_use blocks don't support cache_control;
+  // the rest do.
+  if (
+    block.type === "thinking" ||
+    block.type === "redacted_thinking" ||
+    block.type === "tool_use"
+  ) {
+    return;
+  }
   block.cache_control = cacheControl(ttl);
 }
 
@@ -318,7 +347,11 @@ export function mapAnthropicError(err: unknown): SkawldError {
     });
   }
   if (status === 400) {
-    if (/context|max_tokens|prompt is too long|too many tokens/i.test(message)) {
+    // Narrow match: only genuine context-overflow messages. A broad regex
+    // (matching "max_tokens", "context", etc.) misclassifies unrelated 400s
+    // such as thinking-budget rejections (`budget_tokens >= max_tokens`) as
+    // ContextLengthError, triggering a wasted forced compaction + retry.
+    if (/prompt is too long|maximum context length/i.test(message)) {
       return new ContextLengthError(message, { cause: err });
     }
     return new ProviderError(message, {
@@ -419,6 +452,10 @@ export class AnthropicProvider extends BaseProvider {
     try {
       yield* mapWireEvents(wire, req.model);
     } catch (err) {
+      // Both vendor SDKs surface a user abort mid-stream as an error whose
+      // name/status don't identify it as an abort. Check the request signal
+      // directly so a clean cancel never maps to a retryable ProviderError.
+      if (req.signal.aborted) throw new AbortError("request aborted", { cause: err });
       throw mapAnthropicError(err);
     } finally {
       wire.controller?.abort?.();
@@ -464,6 +501,12 @@ export async function* mapWireEvents(
   const toolBlocks = new Map<number, string>();
   let usage: Usage = { input_tokens: 0, output_tokens: 0 };
   let stopReason: StopReason = "end_turn";
+  // Opaque redacted_thinking blocks, captured for verbatim replay.
+  const redactedThinking: Array<{ type: "redacted_thinking"; data: string }> = [];
+  // A clean SSE close without a terminal event (proxy timeout, server FIN)
+  // means the response was truncated; surface it instead of yielding a fake
+  // end_turn with partial content.
+  let sawTerminal = false;
 
   for await (const raw of wire) {
     const ev = raw as Record<string, unknown> & { type?: string };
@@ -476,12 +519,14 @@ export async function* mapWireEvents(
       case "content_block_start": {
         const e = ev as {
           index: number;
-          content_block: { type: string; id?: string; name?: string };
+          content_block: { type: string; id?: string; name?: string; data?: string };
         };
         const cb = e.content_block;
         if (cb.type === "tool_use" && cb.id && cb.name) {
           toolBlocks.set(e.index, cb.id);
           yield { type: "tool_use_start", id: cb.id, name: cb.name };
+        } else if (cb.type === "redacted_thinking" && typeof cb.data === "string") {
+          redactedThinking.push({ type: "redacted_thinking", data: cb.data });
         }
         break;
       }
@@ -534,13 +579,15 @@ export async function* mapWireEvents(
           delta?: { stop_reason?: string | null };
           usage?: WireUsage;
         };
-        if (e.delta?.stop_reason !== undefined) {
+        if (e.delta?.stop_reason !== undefined && e.delta.stop_reason !== null) {
           stopReason = mapStopReason(e.delta.stop_reason);
+          sawTerminal = true;
         }
         if (e.usage) usage = readUsage(e.usage, usage);
         break;
       }
       case "message_stop": {
+        sawTerminal = true;
         // emit terminal event below
         break;
       }
@@ -550,5 +597,15 @@ export async function* mapWireEvents(
     }
   }
 
-  yield { type: "message_end", stop_reason: stopReason, usage };
+  if (!sawTerminal) {
+    throw new ProviderError("stream ended before message_stop", {
+      retryable: true,
+    });
+  }
+
+  const end: ProviderStreamEvent = { type: "message_end", stop_reason: stopReason, usage };
+  if (redactedThinking.length > 0) {
+    end.provider_metadata = { anthropic: { redacted_thinking: redactedThinking } };
+  }
+  yield end;
 }

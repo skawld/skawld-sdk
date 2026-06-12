@@ -67,8 +67,10 @@ function buildRgArgs(input: GrepInput, searchRoot: string): string[] {
   if (input.glob) args.push("--glob", input.glob);
   if (input.type) args.push("--type", input.type);
 
-  // Always pass a target path — non-interactive rg can block on stdin otherwise
-  args.push(input.pattern, searchRoot);
+  // Pass the pattern via -e so patterns beginning with '-' (e.g. "->", "--foo")
+  // aren't parsed as rg flags. Always pass a target path — non-interactive rg
+  // can block on stdin otherwise.
+  args.push("-e", input.pattern, searchRoot);
   return args;
 }
 

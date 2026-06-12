@@ -50,37 +50,45 @@ function appendToAccumulator(acc: Accumulator, chunk: string): void {
 // Process-tree termination
 // ---------------------------------------------------------------------------
 
-function killTree(pid: number): void {
+/**
+ * Terminate the process tree. Returns the SIGKILL-escalation timer (POSIX only)
+ * so the caller can clear it once the process actually closes — otherwise it
+ * would keep the event loop alive and could fire SIGKILL at a dead/recycled pid.
+ */
+function killTree(pid: number): ReturnType<typeof setTimeout> | undefined {
   if (isWindows) {
     try {
       spawn("taskkill", ["/pid", String(pid), "/t", "/f"]);
     } catch {
       // ignore
     }
-    return;
+    return undefined;
   }
   // POSIX: kill the process group (negative pid)
   try {
     process.kill(-pid, "SIGTERM");
   } catch {
     // ESRCH = already gone
-    return;
+    return undefined;
   }
   // Grace period, then SIGKILL
-  setTimeout(() => {
+  const timer = setTimeout(() => {
     try {
       process.kill(-pid, "SIGKILL");
     } catch {
       // already gone
     }
   }, 2_000);
+  timer.unref?.();
+  return timer;
 }
 
 // ---------------------------------------------------------------------------
 // Format combined output
 // ---------------------------------------------------------------------------
 
-function formatOutput(stdout: Accumulator, stderr: Accumulator, exitCode: number): string {
+/** Combine stdout/stderr with truncation accounting, without an exit line. */
+function combineOutput(stdout: Accumulator, stderr: Accumulator): string {
   let combined =
     stderr.text.length > 0
       ? `${stdout.text}\n---\n${stderr.text}`
@@ -101,7 +109,7 @@ function formatOutput(stdout: Accumulator, stderr: Accumulator, exitCode: number
     truncationNote = `\n… (${omitted + totalTruncated} chars truncated)`;
   }
 
-  return `${combined}${truncationNote}\nexit: ${exitCode}`;
+  return `${combined}${truncationNote}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,27 +217,45 @@ export class BashTool implements Tool<BashInput> {
     return new Promise<ToolResult>((resolve) => {
       let settled = false;
       let killTimer: ReturnType<typeof setTimeout> | undefined;
+      let killEscalationTimer: ReturnType<typeof setTimeout> | undefined;
 
       function settle(result: ToolResult): void {
         if (settled) return;
         settled = true;
         if (killTimer) clearTimeout(killTimer);
+        if (killEscalationTimer) clearTimeout(killEscalationTimer);
         resolve(result);
       }
 
       function doKill(): void {
         if (child.pid !== undefined) {
-          killTree(child.pid);
+          killEscalationTimer = killTree(child.pid);
         }
       }
 
-      // 1. Natural exit
-      child.on("close", (code) => {
-        // Flush remaining bytes in StringDecoder buffer
+      // Kill the tree, flush any buffered output, and settle with that captured
+      // output plus a trailing status line. Shared by the timeout and abort paths.
+      const killAndSettle = (trailer: string): void => {
+        doKill();
         appendToAccumulator(stdout, stdoutDecoder.end());
         appendToAccumulator(stderr, stderrDecoder.end());
         settle({
-          content: formatOutput(stdout, stderr, code ?? 1),
+          content: `${combineOutput(stdout, stderr)}\n${trailer}`,
+          summary: this.summarize(input),
+          is_error: true,
+        });
+      };
+
+      // 1. Natural exit
+      child.on("close", (code, signal) => {
+        // Flush remaining bytes in StringDecoder buffer
+        appendToAccumulator(stdout, stdoutDecoder.end());
+        appendToAccumulator(stderr, stderrDecoder.end());
+        // Surface the signal name when the process died by signal rather than
+        // misreporting it as exit code 1.
+        const exitLine = signal ? `exit: signal ${signal}` : `exit: ${code ?? 1}`;
+        settle({
+          content: `${combineOutput(stdout, stderr)}\n${exitLine}`,
           summary: this.summarize(input),
         });
       });
@@ -243,24 +269,15 @@ export class BashTool implements Tool<BashInput> {
         });
       });
 
-      // 2. Timeout
+      // 2. Timeout — include partial output, which is what the model needs to
+      // diagnose a hang.
       killTimer = setTimeout(() => {
-        doKill();
-        settle({
-          content: `Bash: timed out after ${timeout_ms} ms.`,
-          summary: this.summarize(input),
-          is_error: true,
-        });
+        killAndSettle(`Bash: timed out after ${timeout_ms} ms.`);
       }, timeout_ms);
 
       // 3. Abort signal
       const onAbort = () => {
-        doKill();
-        settle({
-          content: "Bash: aborted by signal.",
-          summary: this.summarize(input),
-          is_error: true,
-        });
+        killAndSettle("Bash: aborted by signal.");
       };
 
       if (ctx.signal.aborted) {

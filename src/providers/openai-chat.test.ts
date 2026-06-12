@@ -271,15 +271,17 @@ describe("buildPayload", () => {
     expect(buildPayload(req()).tools).toBeUndefined();
   });
 
-  it("omits max_tokens from the wire when req.max_output_tokens is undefined", () => {
+  it("omits max_completion_tokens from the wire when req.max_output_tokens is undefined", () => {
     const payload = buildPayload(req({ max_output_tokens: undefined }));
-    expect(payload.max_tokens).toBeUndefined();
-    expect("max_tokens" in payload).toBe(false);
+    expect(payload.max_completion_tokens).toBeUndefined();
+    expect("max_completion_tokens" in payload).toBe(false);
   });
 
-  it("sets max_tokens on the wire when req.max_output_tokens is provided", () => {
+  it("sets max_completion_tokens on the wire when req.max_output_tokens is provided", () => {
     const payload = buildPayload(req({ max_output_tokens: 2048 }));
-    expect(payload.max_tokens).toBe(2048);
+    expect(payload.max_completion_tokens).toBe(2048);
+    // The deprecated max_tokens param must never be emitted (reasoning models reject it).
+    expect("max_tokens" in payload).toBe(false);
   });
 });
 
@@ -381,13 +383,15 @@ describe("mapWireEvents", () => {
       { choices: [{ finish_reason: "tool_calls", delta: {} }] },
     ];
     const out = await collect(mapWireEvents(fromArray(chunks), "m"));
-    // First tool_call chunk has no id+name — buffered. Second chunk completes start.
+    // First tool_call chunk has no id+name — its args are buffered, not dropped.
+    // Second chunk completes start and the buffered fragment is flushed with it.
     expect(out.filter((e) => e.type === "tool_use_start")).toEqual([
       { type: "tool_use_start", id: "tc1", name: "X" },
     ]);
-    // Argument delta from the chunk that supplied id+name should still be emitted.
+    // Both the pre-start fragment and the completing chunk's args are preserved
+    // (lossless accumulation), yielding the full JSON input.
     expect(out.filter((e) => e.type === "tool_use_input_delta")).toEqual([
-      { type: "tool_use_input_delta", id: "tc1", json_delta: ":1}" },
+      { type: "tool_use_input_delta", id: "tc1", json_delta: '{"a":1}' },
     ]);
   });
 
@@ -448,7 +452,7 @@ describe("OpenAIChatCompletionsProvider", () => {
   });
 });
 
-import { ProviderError, RateLimitError } from "../core/errors.js";
+import { AbortError, ProviderError, RateLimitError } from "../core/errors.js";
 
 // Retry of the initial connection (429/5xx/network) is managed by Skawld so
 // all providers share the same backoff semantics. The SDK retry budget stays
@@ -551,5 +555,54 @@ describe("OpenAIChatCompletionsProvider — max_retries", () => {
       })(),
     ).rejects.toBeInstanceOf(ProviderError);
     expect(opens).toBe(1);
+  });
+});
+
+describe("refusal mapping (D7)", () => {
+  it("surfaces a streamed refusal as assistant text", async () => {
+    const chunks: unknown[] = [
+      { choices: [{ delta: { refusal: "I can't help with that." } }] },
+      { choices: [{ finish_reason: "content_filter", delta: {} }] },
+    ];
+    const out = await collect(mapWireEvents(fromArray(chunks), "m"));
+    expect(out).toContainEqual({ type: "text_delta", text: "I can't help with that." });
+  });
+});
+
+describe("abort-aware error mapping (D1)", () => {
+  it("maps a mid-stream failure to AbortError when the signal is aborted", async () => {
+    const ctrl = new AbortController();
+    class AbortingProvider extends OpenAIChatCompletionsProvider {
+      override openStream() {
+        const iter = (async function* (): AsyncGenerator<never> {
+          ctrl.abort();
+          throw new Error("Request was aborted.");
+        })();
+        return Object.assign(iter, { controller: undefined });
+      }
+    }
+    const p = new AbortingProvider({ apiKey: "x" });
+    await expect(
+      (async () => {
+        for await (const _ev of p.stream(req({ signal: ctrl.signal, max_retries: 0 }))) void _ev;
+      })(),
+    ).rejects.toBeInstanceOf(AbortError);
+  });
+
+  it("maps the same error shape to a retryable ProviderError when not aborted", async () => {
+    class ResetProvider extends OpenAIChatCompletionsProvider {
+      override openStream() {
+        const iter = (async function* (): AsyncGenerator<never> {
+          throw new Error("Connection reset.");
+        })();
+        return Object.assign(iter, { controller: undefined });
+      }
+    }
+    const p = new ResetProvider({ apiKey: "x" });
+    await expect(
+      (async () => {
+        for await (const _ev of p.stream(req({ max_retries: 0 }))) void _ev;
+      })(),
+    ).rejects.toBeInstanceOf(ProviderError);
   });
 });

@@ -92,15 +92,15 @@ describe("withRetry", () => {
     expect(calls).toBe(1);
   });
 
-  it("honors RateLimitError.retry_after_seconds (clamped by maxDelayMs)", async () => {
+  it("honors RateLimitError.retry_after_seconds without clamping up to maxDelayMs", async () => {
     let calls = 0;
     const start = Date.now();
+    // 10ms exceeds maxDelayMs=5ms but is honored verbatim (no clamp-down).
     await withRetry(
       async () => {
         calls++;
         if (calls === 1) {
-          // 100s clamped to maxDelayMs=5ms
-          throw new RateLimitError("slow", { retry_after_seconds: 100 });
+          throw new RateLimitError("slow", { retry_after_seconds: 0.01 });
         }
         return "ok";
       },
@@ -110,6 +110,23 @@ describe("withRetry", () => {
     const elapsed = Date.now() - start;
     expect(calls).toBe(2);
     expect(elapsed).toBeLessThan(200);
+  });
+
+  it("fails fast when retry_after exceeds the hard cap", async () => {
+    let calls = 0;
+    const start = Date.now();
+    await expect(
+      withRetry(
+        async () => {
+          calls++;
+          throw new RateLimitError("slow", { retry_after_seconds: 200 });
+        },
+        fastOpts,
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(RateLimitError);
+    expect(calls).toBe(1);
+    expect(Date.now() - start).toBeLessThan(200);
   });
 
   it("aborts mid-backoff via signal", async () => {
@@ -225,7 +242,7 @@ describe("withRetryableStream", () => {
         () => (async function* () {
           calls++;
           if (calls === 1) {
-            throw new RateLimitError("slow", { retry_after_seconds: 100 });
+            throw new RateLimitError("slow", { retry_after_seconds: 0.01 });
           }
           yield "ok";
         })(),

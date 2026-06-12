@@ -36,6 +36,18 @@ describe("TaskUpdateTool", () => {
     expect(() => tool.validate({ task_id: "1", status: 42 })).toThrow();
   });
 
+  test("validate throws on an invalid status, naming the allowed values", () => {
+    expect(() => tool.validate({ task_id: "1", status: "done" })).toThrow(
+      /pending, in_progress, completed, deleted/,
+    );
+  });
+
+  test("validate accepts each allowed status", () => {
+    for (const status of ["pending", "in_progress", "completed", "deleted"]) {
+      expect(tool.validate({ task_id: "1", status }).status).toBe(status);
+    }
+  });
+
   test("validate throws if add_blocks is not array of strings", () => {
     expect(() => tool.validate({ task_id: "1", add_blocks: [1, 2] })).toThrow();
   });

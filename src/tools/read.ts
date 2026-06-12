@@ -3,7 +3,7 @@ import path from "node:path";
 import { createReadStream } from "node:fs";
 import type { Tool, ToolContext, ToolResult } from "./base.js";
 import { ToolExecutionError } from "../core/errors.js";
-import { resolvePath, formatNumberedLines, truncateOutput } from "./_helpers.js";
+import { resolvePath, canonicalizePath, formatNumberedLines, truncateOutput } from "./_helpers.js";
 
 export interface ReadInput {
   file_path: string;
@@ -70,13 +70,19 @@ function truncateLines(content: string): string {
     .join("\n");
 }
 
+interface StreamReadResult {
+  content: string;
+  /** Total lines scanned. Authoritative only when the whole file was read. */
+  totalLines: number;
+}
+
 /** Read lines [startLine, startLine+limit) from a stream, 1-indexed. */
 async function readLinesStream(
   absPath: string,
   startLine: number,
   limit: number,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<StreamReadResult> {
   return new Promise((resolve, reject) => {
     const lines: string[] = [];
     let lineNum = 0;
@@ -119,7 +125,7 @@ async function readLinesStream(
           lines.push(buf);
         }
       }
-      resolve(lines.join("\n"));
+      resolve({ content: lines.join("\n"), totalLines: lineNum });
     });
   });
 }
@@ -163,8 +169,9 @@ export class ReadTool implements Tool<ReadInput> {
     const offset = input.offset ?? 1;
     const limit = input.limit ?? 2000;
 
-    // Device-path guard.
-    if (isDevicePath(absPath)) {
+    // Device-path guard. Canonicalize first so a symlink pointing at a device
+    // (e.g. /tmp/x → /dev/stdin) can't bypass the deny list.
+    if (isDevicePath(absPath) || isDevicePath(canonicalizePath(absPath))) {
       return {
         content: `Error: ${absPath} is a device path and cannot be read.`,
         summary: this.summarize(input),
@@ -227,8 +234,10 @@ export class ReadTool implements Tool<ReadInput> {
       }
       try {
         const sniffBuf = Buffer.alloc(Math.min(BINARY_DETECT_BYTES, stat.size));
-        await fd.read(sniffBuf, 0, sniffBuf.length, 0);
-        if (detectNullBytes(sniffBuf)) {
+        const { bytesRead } = await fd.read(sniffBuf, 0, sniffBuf.length, 0);
+        // Sniff only the bytes actually read — a short read leaves the buffer
+        // tail zero-filled, which would otherwise look like null bytes.
+        if (detectNullBytes(sniffBuf.subarray(0, bytesRead))) {
           return error("Binary file (null bytes detected). Use Bash to inspect.", input, this);
         }
       } catch (err: unknown) {
@@ -252,14 +261,26 @@ export class ReadTool implements Tool<ReadInput> {
     let rawLines: string;
     const useStreaming = offset > 1 || stat.size > LARGE_FILE_THRESHOLD;
     if (useStreaming) {
+      let result: StreamReadResult;
       try {
-        rawLines = await readLinesStream(absPath, offset, limit, ctx.signal);
+        result = await readLinesStream(absPath, offset, limit, ctx.signal);
       } catch (err: unknown) {
         const e = err as NodeJS.ErrnoException;
         if ((e as Error).message === "aborted") return error("Read aborted.", input, this);
         if (e.code === "EACCES") return error("Permission denied.", input, this);
         return error(`Cannot read file: ${(e as Error).message}`, input, this);
       }
+      // An offset past the last line yields no content. Report it explicitly
+      // (and do NOT mark the file read) so the model doesn't mistake a
+      // non-empty file for an empty one and overwrite it.
+      if (result.content === "" && offset > result.totalLines) {
+        return error(
+          `offset ${offset} is beyond end of file (${result.totalLines} lines total).`,
+          input,
+          this,
+        );
+      }
+      rawLines = result.content;
     } else {
       // Fast path: read whole file and slice.
       let text: string;

@@ -62,6 +62,12 @@ describe("EditTool — validate", () => {
     expect(() => tool.validate({ file_path: "a.ts", old_string: 1, new_string: "y" })).toThrow(ToolExecutionError);
   });
 
+  test("throws for empty old_string", () => {
+    expect(() => tool.validate({ file_path: "a.ts", old_string: "", new_string: "y" })).toThrow(
+      /non-empty/i,
+    );
+  });
+
   test("throws for missing new_string", () => {
     expect(() => tool.validate({ file_path: "a.ts", old_string: "x" })).toThrow(ToolExecutionError);
   });
@@ -147,6 +153,85 @@ describe("EditTool — happy path", () => {
     const content = fs.readFileSync(file, "utf8");
     expect(content).not.toContain("\r\n");
     expect(content).toBe("a\nB\nc\n");
+  });
+
+  // E1: new_string containing JS replacement patterns must be written literally.
+  test.each([["$$VAR"], ["$&dup"], ["pre$`post"], ["a$'b"]])(
+    "writes %p literally in single-replace mode (no $-expansion)",
+    async (replacement) => {
+      const file = path.join(tmpDir, "dollar.mk");
+      fs.writeFileSync(file, "TARGET = here\n");
+      const ctx = makeCtx(tmpDir, trackerWithFile(file));
+      const result = await tool.execute(
+        { file_path: file, old_string: "here", new_string: replacement, replace_all: false },
+        ctx,
+      );
+      expect(result.is_error).toBeUndefined();
+      expect(fs.readFileSync(file, "utf8")).toBe(`TARGET = ${replacement}\n`);
+    },
+  );
+
+  test("writes $-patterns literally in replace_all mode", async () => {
+    const file = path.join(tmpDir, "dollar-all.mk");
+    fs.writeFileSync(file, "x\nx\n");
+    const ctx = makeCtx(tmpDir, trackerWithFile(file));
+    const result = await tool.execute(
+      { file_path: file, old_string: "x", new_string: "$$V", replace_all: true },
+      ctx,
+    );
+    expect(result.is_error).toBeUndefined();
+    expect(fs.readFileSync(file, "utf8")).toBe("$$V\n$$V\n");
+  });
+
+  // E3: a multi-line old_string supplied with LF must match a CRLF file.
+  test("multi-line old_string matches a CRLF file and preserves CRLF", async () => {
+    const file = path.join(tmpDir, "crlf-multi.ts");
+    fs.writeFileSync(file, "line1\r\nline2\r\nline3\r\n");
+    const ctx = makeCtx(tmpDir, trackerWithFile(file));
+    const result = await tool.execute(
+      // old_string uses LF (as the model supplies it)
+      { file_path: file, old_string: "line1\nline2", new_string: "a\nb", replace_all: false },
+      ctx,
+    );
+    expect(result.is_error).toBeUndefined();
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toBe("a\r\nb\r\nline3\r\n");
+  });
+});
+
+describe("EditTool — symlink canonicalization (E4)", () => {
+  const tool = new EditTool();
+
+  test("edit through a symlink preserves the link and updates the target", async () => {
+    const target = path.join(tmpDir, "real.json");
+    const link = path.join(tmpDir, "link.json");
+    fs.writeFileSync(target, "value\n");
+    fs.symlinkSync(target, link);
+    const ctx = makeCtx(tmpDir, trackerWithFile(link));
+    const result = await tool.execute(
+      { file_path: link, old_string: "value", new_string: "updated", replace_all: false },
+      ctx,
+    );
+    expect(result.is_error).toBeUndefined();
+    // The link is still a symlink, and the target received the edit.
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(target, "utf8")).toBe("updated\n");
+  });
+
+  test("Read via link then Edit via target passes the read-tracker", async () => {
+    const target = path.join(tmpDir, "t.json");
+    const link = path.join(tmpDir, "l.json");
+    fs.writeFileSync(target, "abc\n");
+    fs.symlinkSync(target, link);
+    const tracker = new FileReadTracker();
+    const readTool = new ReadTool();
+    await readTool.execute({ file_path: link }, makeCtx(tmpDir, tracker));
+    const result = await tool.execute(
+      { file_path: target, old_string: "abc", new_string: "xyz", replace_all: false },
+      makeCtx(tmpDir, tracker),
+    );
+    expect(result.is_error).toBeUndefined();
+    expect(fs.readFileSync(target, "utf8")).toBe("xyz\n");
   });
 });
 

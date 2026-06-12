@@ -866,3 +866,112 @@ describe("AnthropicProvider", () => {
     expect(opens).toBe(1);
   });
 });
+
+describe("abort-aware error mapping (D1)", () => {
+  it("maps a mid-stream failure to AbortError when the signal is aborted", async () => {
+    const ctrl = new AbortController();
+    class AbortingProvider extends AnthropicProvider {
+      override openStream() {
+        const iter = (async function* (): AsyncGenerator<never> {
+          ctrl.abort();
+          // Vendor SDK abort shape: a plain Error, name "Error", no status.
+          throw new Error("Request was aborted.");
+        })();
+        return Object.assign(iter, { controller: undefined });
+      }
+    }
+    const p = new AbortingProvider({ apiKey: "x" });
+    await expect(
+      (async () => {
+        for await (const _ev of p.stream(req({ signal: ctrl.signal, max_retries: 0 }))) void _ev;
+      })(),
+    ).rejects.toBeInstanceOf(AbortError);
+  });
+
+  it("maps the same error shape to a retryable ProviderError when not aborted", async () => {
+    class ResetProvider extends AnthropicProvider {
+      override openStream() {
+        const iter = (async function* (): AsyncGenerator<never> {
+          throw new Error("Connection reset.");
+        })();
+        return Object.assign(iter, { controller: undefined });
+      }
+    }
+    const p = new ResetProvider({ apiKey: "x" });
+    await expect(
+      (async () => {
+        for await (const _ev of p.stream(req({ max_retries: 0 }))) void _ev;
+      })(),
+    ).rejects.toBeInstanceOf(ProviderError);
+  });
+});
+
+describe("premature-close guard (D2)", () => {
+  it("throws a retryable ProviderError when the stream ends before a terminal event", async () => {
+    const events: unknown[] = [
+      { type: "content_block_start", index: 0, content_block: { type: "text" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+      // no message_delta(stop_reason) and no message_stop
+    ];
+    const out: ProviderStreamEvent[] = [];
+    let err: unknown;
+    try {
+      for await (const ev of mapWireEvents(fromArray(events), "m")) out.push(ev);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ProviderError);
+    expect((err as ProviderError).retryable).toBe(true);
+    expect(out.some((e) => e.type === "message_end")).toBe(false);
+  });
+
+  it("does not throw when a terminal event is present", async () => {
+    const events: unknown[] = [
+      { type: "content_block_start", index: 0, content_block: { type: "text" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+    ];
+    const out = await collect(mapWireEvents(fromArray(events), "m"));
+    expect(out.at(-1)).toMatchObject({ type: "message_end", stop_reason: "end_turn" });
+  });
+});
+
+describe("redacted_thinking round-trip (D6)", () => {
+  it("captures the block on the message_end metadata and replays it before tool_use", async () => {
+    const events: unknown[] = [
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "redacted_thinking", data: "ENC" },
+      },
+      {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "tool_use", id: "t1", name: "Bash" },
+      },
+      { type: "content_block_stop", index: 1 },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
+    const out = await collect(mapWireEvents(fromArray(events), "m"));
+    const end = out.find((e) => e.type === "message_end");
+    expect(end?.type).toBe("message_end");
+    if (end?.type === "message_end") {
+      expect(end.provider_metadata?.anthropic?.redacted_thinking).toEqual([
+        { type: "redacted_thinking", data: "ENC" },
+      ]);
+    }
+
+    const translated = translateMessages([
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }],
+        provider_metadata: {
+          anthropic: { redacted_thinking: [{ type: "redacted_thinking", data: "ENC" }] },
+        },
+      },
+    ]);
+    expect(translated[0]?.content[0]).toEqual({ type: "redacted_thinking", data: "ENC" });
+    expect(translated[0]?.content[1]?.type).toBe("tool_use");
+  });
+});

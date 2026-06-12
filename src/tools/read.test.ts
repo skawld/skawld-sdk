@@ -248,3 +248,43 @@ describe("ReadTool — image branch", () => {
     expect(result.summary).toContain("B");
   });
 });
+
+describe("ReadTool — hardening (E4/E7/E8)", () => {
+  const tool = new ReadTool();
+
+  // E7: a short read leaves the sniff buffer zero-filled; only the bytes read
+  // should be inspected, or a short text file looks binary.
+  test("short text file is not misdetected as binary", async () => {
+    const file = path.join(tmpDir, "short.txt");
+    fs.writeFileSync(file, "hi"); // 2 bytes, far less than the sniff window
+    const ctx = makeCtx(tmpDir);
+    const result = await tool.execute({ file_path: file }, ctx);
+    expect(result.is_error).toBeUndefined();
+    expect(result.content as string).toContain("hi");
+  });
+
+  // E8: an offset past EOF must report out-of-range, not "<file is empty>",
+  // and must not mark the file as read.
+  test("offset beyond EOF reports out-of-range and does not mark read", async () => {
+    const file = path.join(tmpDir, "hundred.txt");
+    fs.writeFileSync(file, Array.from({ length: 100 }, (_, i) => `line${i + 1}`).join("\n") + "\n");
+    const ctx = makeCtx(tmpDir);
+    const result = await tool.execute({ file_path: file, offset: 500 }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content as string).toMatch(/beyond end of file/i);
+    expect(result.content as string).toContain("100");
+    expect(ctx.fileReadTracker.hasRead(file)).toBe(false);
+  });
+
+  // E4: a symlink pointing at a device path must be denied (before any read —
+  // /dev/zero would otherwise stream zeros forever).
+  test("symlink to a device path is denied", async () => {
+    const link = path.join(tmpDir, "dev-link");
+    if (!fs.existsSync("/dev/zero")) return; // non-POSIX environment — skip
+    fs.symlinkSync("/dev/zero", link);
+    const ctx = makeCtx(tmpDir);
+    const result = await tool.execute({ file_path: link }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content as string).toMatch(/device path/i);
+  });
+});

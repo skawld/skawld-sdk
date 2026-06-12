@@ -20,6 +20,37 @@ export function resolvePath(input: string, cwd: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// canonicalizePath
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a path to its real, symlink-free form. For a path that doesn't exist
+ * yet (a new file), canonicalize the nearest existing ancestor and append the
+ * remainder, so callers get a stable identity that follows symlinks into the
+ * real directory tree. Falls back to a plain absolute resolve at the FS root.
+ */
+export function canonicalizePath(p: string): string {
+  const abs = path.resolve(p);
+  try {
+    return fs.realpathSync.native(abs);
+  } catch {
+    let dir = path.dirname(abs);
+    const trailing: string[] = [path.basename(abs)];
+    for (;;) {
+      try {
+        const realDir = fs.realpathSync.native(dir);
+        return path.join(realDir, ...trailing.slice().reverse());
+      } catch {
+        const parent = path.dirname(dir);
+        if (parent === dir) return abs; // reached root with nothing resolved
+        trailing.push(path.basename(dir));
+        dir = parent;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // findExecutable
 // ---------------------------------------------------------------------------
 
@@ -107,14 +138,18 @@ export function truncateOutput(text: string, maxChars: number): string {
  * Temp files are named `.tmp-skawld-<uuid>-<basename>` for easy identification.
  */
 export async function atomicWriteFile(absPath: string, content: string): Promise<void> {
-  const dir = path.dirname(absPath);
-  const base = path.basename(absPath);
+  // Canonicalize first so an edit through a symlink writes *through* the link
+  // (the temp file and rename target live in the real directory), preserving
+  // the symlink instead of replacing it with a regular file.
+  const canonical = canonicalizePath(absPath);
+  const dir = path.dirname(canonical);
+  const base = path.basename(canonical);
   const tmp = path.join(dir, `.tmp-skawld-${randomUUID()}-${base}`);
 
   // Determine existing mode so we can preserve it.
   let existingMode: number | undefined;
   try {
-    existingMode = fs.statSync(absPath).mode;
+    existingMode = fs.statSync(canonical).mode;
   } catch {
     // File doesn't exist yet — no mode to preserve.
   }
@@ -135,7 +170,7 @@ export async function atomicWriteFile(absPath: string, content: string): Promise
       fs.closeSync(fd);
     }
 
-    fs.renameSync(tmp, absPath);
+    fs.renameSync(tmp, canonical);
   } catch (err) {
     // Best-effort cleanup.
     try { fs.unlinkSync(tmp); } catch { /* ignore */ }

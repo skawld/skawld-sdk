@@ -25,13 +25,46 @@ describe("mapOpenAIError", () => {
     expect((e as RateLimitError).retry_after_seconds).toBe(8);
   });
 
-  it("400 with context_length_exceeded → ContextLengthError", () => {
+  it("429 with HTTP-date retry-after → parsed to delta seconds (D9)", () => {
+    const future = new Date(Date.now() + 5000).toUTCString();
+    const e = mapOpenAIError({
+      status: 429,
+      message: "slow down",
+      headers: { "retry-after": future },
+    });
+    expect(e).toBeInstanceOf(RateLimitError);
+    const secs = (e as RateLimitError).retry_after_seconds;
+    expect(secs).toBeGreaterThan(3);
+    expect(secs).toBeLessThanOrEqual(6);
+  });
+
+  it("400 with context_length_exceeded code → ContextLengthError", () => {
     expect(
       mapOpenAIError({
         status: 400,
-        error: { message: "context_length_exceeded blah" },
+        error: { code: "context_length_exceeded", message: "too long" },
       }),
     ).toBeInstanceOf(ContextLengthError);
+  });
+
+  it("400 'maximum context length' message (no code) → ContextLengthError", () => {
+    expect(
+      mapOpenAIError({
+        status: 400,
+        error: { message: "This model's maximum context length is 8192 tokens" },
+      }),
+    ).toBeInstanceOf(ContextLengthError);
+  });
+
+  it("400 mentioning max_tokens (no code) → non-retryable ProviderError", () => {
+    // A parameter-name 400 (e.g. "max_tokens is too large") must not be
+    // misclassified as context overflow.
+    const e = mapOpenAIError({
+      status: 400,
+      error: { message: "max_tokens is too large: supports at most 16384" },
+    });
+    expect(e).toBeInstanceOf(ProviderError);
+    expect((e as ProviderError).retryable).toBe(false);
   });
 
   it("400 other → non-retryable ProviderError", () => {

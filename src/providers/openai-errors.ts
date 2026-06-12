@@ -10,7 +10,7 @@ import {
   RateLimitError,
   SkawldError,
 } from "../core/errors.js";
-import { readRetryAfter, readStatus } from "./http-error-fields.js";
+import { readErrorCode, readRetryAfter, readStatus } from "./http-error-fields.js";
 
 export function mapOpenAIError(err: unknown): SkawldError {
   if (err instanceof SkawldError) return err;
@@ -29,10 +29,14 @@ export function mapOpenAIError(err: unknown): SkawldError {
     });
   }
   if (status === 400) {
+    // Prefer the structured code; only fall back to a narrow message regex when
+    // no code is present. A broad regex (matching "max_tokens", "too long")
+    // misclassifies parameter-name and other 400s as context overflow,
+    // triggering a wasted forced compaction + retry.
+    const code = readErrorCode(err);
     if (
-      /context_length_exceeded|maximum context|too long|max_tokens|reduce the length/i.test(
-        message,
-      )
+      code === "context_length_exceeded" ||
+      (code === undefined && /prompt is too long|maximum context length/i.test(message))
     ) {
       return new ContextLengthError(message, { cause: err });
     }

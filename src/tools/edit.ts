@@ -67,6 +67,12 @@ export class EditTool implements Tool<EditInput> {
     if (typeof raw.old_string !== "string") {
       throw new ToolExecutionError("old_string must be a string", { tool_name: this.name });
     }
+    if (raw.old_string === "") {
+      throw new ToolExecutionError(
+        "old_string must be non-empty; use Write to create a file.",
+        { tool_name: this.name },
+      );
+    }
     if (typeof raw.new_string !== "string") {
       throw new ToolExecutionError("new_string must be a string", { tool_name: this.name });
     }
@@ -117,8 +123,25 @@ export class EditTool implements Tool<EditInput> {
       return err(`Cannot read file: ${ex.message}`, input, this);
     }
 
-    // Step 6: Count occurrences.
-    const count = countOccurrences(text, input.old_string);
+    // Step 6: Preserve dominant line-ending style, and pick the effective needle.
+    const sample = text.slice(0, 16384);
+    const dominant = detectLineEnding(sample);
+    let needle = input.old_string;
+    let newString = input.new_string;
+    if (dominant === "\r\n") {
+      // Normalize bare LF in new_string to CRLF (avoid double-converting existing CRLF).
+      newString = newString.replace(/\r?\n/g, "\r\n");
+      // The model supplies LF-joined old_string; on a CRLF file the literal
+      // match fails, so retry with a CRLF-normalized needle. Uniqueness
+      // counting must use that same normalized needle.
+      if (!text.includes(needle)) {
+        const crlfNeedle = needle.replace(/\r?\n/g, "\r\n");
+        if (text.includes(crlfNeedle)) needle = crlfNeedle;
+      }
+    }
+
+    // Step 7: Count occurrences.
+    const count = countOccurrences(text, needle);
     if (count === 0) {
       return err("old_string not found in file.", input, this);
     }
@@ -130,19 +153,12 @@ export class EditTool implements Tool<EditInput> {
       );
     }
 
-    // Step 7: Preserve dominant line-ending style.
-    const sample = text.slice(0, 16384);
-    const dominant = detectLineEnding(sample);
-    let newString = input.new_string;
-    if (dominant === "\r\n") {
-      // Normalize bare LF in new_string to CRLF (avoid double-converting existing CRLF).
-      newString = newString.replace(/\r?\n/g, "\r\n");
-    }
-
-    // Replace — using split+join for replace_all (O(N), correct, YAGNI for v1).
+    // Replace literally — split+join for replace_all, and a function replacement
+    // for the single case so `$$`, `$&`, `` $` `` etc. in new_string are written
+    // byte-literal instead of being expanded as JS replacement patterns.
     const newText = input.replace_all
-      ? text.split(input.old_string).join(newString)
-      : text.replace(input.old_string, newString);
+      ? text.split(needle).join(newString)
+      : text.replace(needle, () => newString);
 
     // Step 8: Atomic write.
     try {

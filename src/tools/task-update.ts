@@ -18,6 +18,8 @@ interface TaskUpdateInput {
 
 const DIFF_FIELDS = ["subject", "status", "owner", "active_form", "description", "blocks", "blocked_by"] as const;
 
+const VALID_STATUSES = ["pending", "in_progress", "completed", "deleted"] as const;
+
 function diffTasks(before: Task, after: Task): string[] {
   const parts: string[] = [];
   for (const field of DIFF_FIELDS) {
@@ -50,7 +52,7 @@ export class TaskUpdateTool implements Tool<TaskUpdateInput> {
       subject: { type: "string" },
       description: { type: "string" },
       active_form: { type: "string" },
-      status: { type: "string", enum: ["pending", "in_progress", "completed", "deleted"] },
+      status: { type: "string", enum: [...VALID_STATUSES] },
       owner: { type: "string" },
       add_blocks: { type: "array", items: { type: "string" } },
       add_blocked_by: { type: "array", items: { type: "string" } },
@@ -75,6 +77,12 @@ export class TaskUpdateTool implements Tool<TaskUpdateInput> {
       if (val !== undefined) {
         if (typeof val !== "string") {
           throw new ToolExecutionError(`${field} must be a string`, { tool_name: this.name });
+        }
+        if (field === "status" && !VALID_STATUSES.includes(val as (typeof VALID_STATUSES)[number])) {
+          throw new ToolExecutionError(
+            `status must be one of: ${VALID_STATUSES.join(", ")}`,
+            { tool_name: this.name },
+          );
         }
         result[field] = val;
       }
