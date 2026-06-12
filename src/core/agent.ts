@@ -19,6 +19,8 @@ import type { CanUseTool } from "../permissions/engine.js";
 import type { PermissionRule } from "../permissions/rules.js";
 import { defaultCompaction } from "./compaction.js";
 import type { CompactionStrategy } from "./compaction.js";
+import { HookRunner } from "./hooks.js";
+import type { Hooks } from "./hooks.js";
 import type { ModelId } from "./types.js";
 import path from "node:path";
 import { loadSkillsFromDir } from "../skills/loader.js";
@@ -95,6 +97,12 @@ export interface AgentOptions {
    * against `cwd`. Pass an absolute path to override.
    */
   configDir?: string;
+  /**
+   * Typed, programmatic interception points around tool calls, prompts, the stop
+   * boundary, and compaction. Agent-level, like `canUseTool`. See
+   * spec_docs/phase-02/14-hooks.html.
+   */
+  hooks?: Hooks;
 }
 
 /** Internal state accessible to the loop and scheduler (Phase 3+). */
@@ -142,6 +150,8 @@ export interface AgentInternal {
   connectSubagents: () => Promise<void>;
   /** Per-parent-Session counter for "Agent #N" default-subagent display names. */
   subagentRunCounters: Map<string, number>;
+  /** Hook orchestration — resolved once at construction; pure (zero I/O). */
+  hookRunner: HookRunner;
 }
 
 const agentInternals = new WeakMap<Agent, AgentInternal>();
@@ -179,6 +189,10 @@ export class Agent {
     }
 
     this.opts = opts;
+
+    // Construct the hook runner eagerly so invalid hook config throws a
+    // ConfigError synchronously from the Agent constructor.
+    const hookRunner = new HookRunner(opts.hooks ?? {});
 
     const cwd = opts.cwd ?? process.cwd();
     const tools = opts.tools ?? defaultTools();
@@ -376,6 +390,7 @@ export class Agent {
       subagentRegistry: buildAgentRegistry([]),
       connectSubagents,
       subagentRunCounters,
+      hookRunner,
     };
 
     agentInternals.set(this, internal);

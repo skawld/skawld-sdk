@@ -4,6 +4,7 @@ import { AbortError } from "./errors.js";
 import { throwIfAborted } from "./abort.js";
 import { ToolEventQueue } from "./tool-event-queue.js";
 import { mergeAsyncGenerators } from "./merge-generators.js";
+import { wrapInSystemReminder } from "../skills/system-reminder.js";
 import type { Event } from "./events.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolUseBlock, ToolResultBlock } from "./types.js";
@@ -11,6 +12,7 @@ import type { Tool, ToolResult } from "../tools/base.js";
 import type { PermissionDecision } from "../permissions/engine.js";
 import type { AgentInternal } from "./agent.js";
 import type { SessionInternal } from "./session.js";
+import type { HookContext } from "./hooks.js";
 
 // ---------------------------------------------------------------------------
 // Internal shapes
@@ -50,6 +52,25 @@ function effectiveInput(
 /** Display name for events: the resolved tool's name, or the raw block name for unknown tools. */
 function callToolName(call: ResolvedCall): string {
   return call.tool?.name ?? call.block.name;
+}
+
+/** Build the HookContext shared by PreToolUse / PostToolUse hooks. */
+function hookContextOf(ai: AgentInternal, si: SessionInternal, signal: AbortSignal): HookContext {
+  return { session_id: si.id, run_id: si.activeRunId ?? "unknown", cwd: ai.cwd, signal };
+}
+
+/**
+ * Append PostToolUse additionalContext strings to a tool_result's content, each
+ * wrapped in <system-reminder>. String content gets "\n\n"-joined; block-array
+ * content gets an extra TextBlock per string.
+ */
+function appendAdditionalContext(content: ToolResult["content"], extras: string[]): ToolResult["content"] {
+  if (extras.length === 0) return content;
+  const wrapped = extras.map((s) => wrapInSystemReminder(s));
+  if (typeof content === "string") {
+    return content + "\n\n" + wrapped.join("\n\n");
+  }
+  return [...content, ...wrapped.map((text) => ({ type: "text" as const, text }))];
 }
 
 /**
@@ -292,6 +313,27 @@ async function runOneToolCall(
   }
 
   const result = settled!.value;
+
+  // PostToolUse — fires only for calls that actually ran (not immediate errors,
+  // not permission/hook denials), including tool-level errors. Runs between
+  // execute() settling and tool_call_end; hook latency is NOT folded into
+  // duration_ms. Fail-open: a throwing hook leaves the result unchanged.
+  let resultContent = result.content;
+  const didExecute = !call.isImmediateError && decision.decision !== "deny";
+  if (didExecute && ai.hookRunner.hasPostToolUse) {
+    const post = await ai.hookRunner.runPostToolUse({
+      tool: call.tool!,
+      toolUseId: call.id,
+      input: effectiveInput(call, decision),
+      content: result.content,
+      isError: result.is_error === true,
+      durationMs: result.duration_ms,
+      ctx: hookContextOf(ai, si, signal),
+    });
+    for (const e of post.errors) emit(e);
+    resultContent = appendAdditionalContext(result.content, post.additionalContext);
+  }
+
   emit({
     type: "tool_call_end",
     tool_use_id: call.id,
@@ -302,7 +344,7 @@ async function runOneToolCall(
   if (skillName !== undefined) {
     emit({ type: "skill_completed", name: skillName, is_error: result.is_error === true });
   }
-  resultSink.pair = [idx, toToolResultBlock(call, result)];
+  resultSink.pair = [idx, toToolResultBlock(call, { ...result, content: resultContent })];
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +408,36 @@ export async function* executeToolCalls(
   const effectiveTools = si.toolsOverride ?? ai.tools;
   const resolved: ResolvedCall[] = blocks.map(b => resolveCall(b, effectiveTools));
 
+  // Pass 0 — PreToolUse hooks. Runs to completion for every resolved,
+  // non-immediate-error call before any permission evaluation, preserving the
+  // "PermissionRequestEvent precedes all start events" contract. A hook may
+  // rewrite the input (mutating call.input/summary so evaluate, the request
+  // event, tool_call_start, and execute all see it), deny it outright, force the
+  // ask path, or pre-allow it (bypassing rules + mode + canUseTool).
+  const hookFinal: Array<PermissionDecision | undefined> = new Array(resolved.length);
+  const hookAsk: boolean[] = new Array(resolved.length).fill(false);
+  if (ai.hookRunner.hasPreToolUse) {
+    const ctx = hookContextOf(ai, si, signal);
+    for (let i = 0; i < resolved.length; i++) {
+      const call = resolved[i]!;
+      if (call.isImmediateError) continue;
+      const res = await ai.hookRunner.runPreToolUse({
+        tool: call.tool!,
+        toolUseId: call.id,
+        input: call.input,
+        summary: call.summary,
+        ctx,
+      });
+      for (const e of res.errors) yield e;
+      call.input = res.input;
+      call.summary = res.summary;
+      if (res.kind === "deny") hookFinal[i] = { decision: "deny", reason: res.reason! };
+      else if (res.kind === "allow") hookFinal[i] = { decision: "allow" };
+      else if (res.kind === "ask") hookAsk[i] = true;
+      // "continue" → leave for normal evaluation on the (possibly rewritten) input.
+    }
+  }
+
   // 2. First pass — synchronous evaluate() to settle non-ask decisions and
   //    collect the calls that resolve to "ask". canUseTool is NOT invoked here,
   //    so the PermissionRequestEvent can be emitted before any callback runs.
@@ -378,6 +450,17 @@ export async function* executeToolCalls(
     if (call.isImmediateError) {
       // Synthetic deny — permission resolution is skipped for immediate errors
       decisions[i] = { decision: "deny", reason: call.immediateErrorReason! };
+      continue;
+    }
+
+    // A PreToolUse hook may have already settled this call.
+    if (hookFinal[i] !== undefined) {
+      decisions[i] = hookFinal[i]!;
+      continue;
+    }
+    if (hookAsk[i]) {
+      // Hook forced the ask path: skip evaluate(), join the ask set directly.
+      askIndices.push(i);
       continue;
     }
 
@@ -419,13 +502,15 @@ export async function* executeToolCalls(
 
   // 4. Second pass — resolve ask-bound calls (invokes canUseTool, which may
   //    rewrite input via updatedInput). Sequential, as canUseTool may prompt.
+  //    A hook-forced ask uses resolveForcedAsk so canUseTool runs even when
+  //    rules/mode would have allowed it (a matching deny rule still wins).
   for (const i of askIndices) {
     const call = resolved[i]!;
+    const pending = { tool_use_id: call.id, tool: call.tool!, input: call.input, cwd: ai.cwd };
     try {
-      decisions[i] = await ai.permissionEngine.resolve(
-        { tool_use_id: call.id, tool: call.tool!, input: call.input, cwd: ai.cwd },
-        signal,
-      );
+      decisions[i] = hookAsk[i]
+        ? await ai.permissionEngine.resolveForcedAsk(pending, signal)
+        : await ai.permissionEngine.resolve(pending, signal);
     } catch {
       // Permission resolution itself threw — treat as deny
       decisions[i] = {

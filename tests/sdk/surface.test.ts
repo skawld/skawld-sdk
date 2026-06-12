@@ -16,8 +16,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Agent, defaultTools, SkawldError, AuthError, loadConfig } from "../../src/sdk.js";
-import type { LoadedConfig, SkawldConfig, ConfigWarning } from "../../src/sdk.js";
+import { Agent, defaultTools, SkawldError, AuthError, HookError, isHookErrorEvent, loadConfig } from "../../src/sdk.js";
+import type { LoadedConfig, SkawldConfig, ConfigWarning, Hooks, PreToolUseHook, StopHook, HookErrorEvent } from "../../src/sdk.js";
 import { InMemorySessionStore } from "../../src/sessions/index.js";
 import { ToolRegistry } from "../../src/tools/index.js";
 import type { CanUseTool } from "../../src/permissions/index.js";
@@ -163,6 +163,38 @@ describe("SDK surface — fast source layer", () => {
 
   test("errors: typed error classes extend SkawldError", () => {
     expect(new AuthError("x")).toBeInstanceOf(SkawldError);
+    expect(new HookError("x")).toBeInstanceOf(SkawldError);
+  });
+
+  test("hooks: AgentOptions.hooks public types + a Stop block continues the loop", async () => {
+    const provider = new MockProvider();
+    provider.enqueue(textTurn("first"));
+    provider.enqueue(textTurn("second"));
+
+    // Public hook types are usable from the main entry.
+    const preTool: PreToolUseHook = () => undefined;
+    const stop: StopHook = (input) => (input.stop_hook_active ? undefined : { action: "block", reason: "keep going" });
+    const hooks: Hooks = { preToolUse: [{ matcher: "*", hook: preTool }], stop: [{ hook: stop }] };
+
+    const agent = new Agent({
+      provider,
+      model: "test-model",
+      tools: defaultTools(),
+      sessionStore: new InMemorySessionStore(),
+      permissions: { mode: "yolo" },
+      hooks,
+    });
+
+    const session = await agent.session();
+    const events = await collect(session.run("ship it"));
+
+    expect(events.some(e => e.type === "user" && e.subtype === "stop_hook")).toBe(true);
+    expect(events.filter(e => e.type === "assistant")).toHaveLength(2);
+    // HookErrorEvent guard + type are exported.
+    const hookErrors: HookErrorEvent[] = events.filter(isHookErrorEvent);
+    expect(Array.isArray(hookErrors)).toBe(true);
+
+    await agent.close();
   });
 
   test("config: loadConfig from main entry merges a project file", async () => {

@@ -67,7 +67,25 @@ export class PermissionEngine {
   async resolve(call: PendingToolCall, signal: AbortSignal): Promise<PermissionDecision> {
     const initial = this.evaluate(call);
     if (initial.decision !== "ask") return initial;
+    return this.invokeCanUseTool(call, signal);
+  }
 
+  /**
+   * Force the canUseTool ask path for a call even when rules or mode would have
+   * allowed it. Used by a PreToolUse hook's `action: "ask"`: a matching deny rule
+   * still wins, but everything else goes through canUseTool rather than
+   * auto-allowing. Validation mirrors {@link evaluate}.
+   */
+  async resolveForcedAsk(call: PendingToolCall, signal: AbortSignal): Promise<PermissionDecision> {
+    const invalidReason = validatePendingCall(call);
+    if (invalidReason !== undefined) return { decision: "deny", reason: invalidReason };
+    const ruleDecision = this.evaluateRules(call);
+    if (ruleDecision?.decision === "deny") return ruleDecision;
+    return this.invokeCanUseTool(call, signal);
+  }
+
+  /** Invoke canUseTool for an ask-bound call and validate its response. */
+  private async invokeCanUseTool(call: PendingToolCall, signal: AbortSignal): Promise<PermissionDecision> {
     const canUseTool = this.opts.canUseTool;
     if (canUseTool === undefined) {
       return { decision: "deny", reason: `Permission denied for ${call.tool.name}: canUseTool callback is not configured.` };

@@ -171,6 +171,7 @@ async function runCompactionImpl(
   ai: AgentInternal,
   signal: AbortSignal,
   strategy: CompactionStrategy,
+  trigger: "threshold" | "forced",
 ): Promise<boolean> {
   const { provider, model } = ai;
   const before = {
@@ -178,6 +179,21 @@ async function runCompactionImpl(
     tokens: si.lastUsage?.input_tokens ?? 0,
   };
   const headBefore = si.providerView[0];
+
+  // PreCompact — observational, fires immediately before the strategy runs, in
+  // both trigger paths and in any session (parent or subagent child). Fail-open:
+  // errors are stashed for the loop to surface; compaction proceeds regardless.
+  if (ai.hookRunner.hasPreCompact) {
+    const pre = await ai.hookRunner.runPreCompact({
+      trigger,
+      messagesBefore: before.messages,
+      tokensBefore: before.tokens,
+      ctx: { session_id: si.id, run_id: si.activeRunId ?? "unknown", cwd: ai.cwd, signal },
+    });
+    si.lastCompactionHookErrors = pre.errors;
+  } else {
+    si.lastCompactionHookErrors = undefined;
+  }
 
   // Pass a snapshot so a misbehaving custom strategy cannot mutate the live array.
   const usageReport: { usage?: Usage } = {};
@@ -238,7 +254,7 @@ export async function maybeCompact(
 
   if (projected < 0.8 * limit) return false;
 
-  return runCompactionImpl(si, ai, signal, strategy);
+  return runCompactionImpl(si, ai, signal, strategy, "threshold");
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +272,7 @@ export async function runForcedCompaction(
   signal: AbortSignal,
 ): Promise<boolean> {
   const strategy = ai.compaction ?? defaultCompaction;
-  return runCompactionImpl(si, ai, signal, strategy);
+  return runCompactionImpl(si, ai, signal, strategy, "forced");
 }
 
 // Re-export the CompactionEvent type so the loop can read lastCompactionInfo

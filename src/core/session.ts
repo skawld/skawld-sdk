@@ -6,7 +6,7 @@ import { runLoop } from "./loop.js";
 import type { Agent } from "./agent.js";
 import type { InvokedSkillRecord, Message, SkillOverlay, Usage } from "./types.js";
 import type { SessionRecord, SessionStore } from "../sessions/store.js";
-import type { CompactionEvent, Event } from "./events.js";
+import type { CompactionEvent, Event, HookErrorEvent } from "./events.js";
 import type { EffortLevel, SystemBlock, ThinkingConfig } from "../providers/base.js";
 import type { ToolRegistry } from "../tools/registry.js";
 
@@ -88,6 +88,13 @@ export interface SessionInternal {
    * Set by runCompactionImpl; read once by the loop to yield CompactionEvent.
    */
   lastCompactionInfo?: CompactionEvent;
+  /**
+   * HookErrorEvents produced by the PreCompact hook during the most recent
+   * compaction attempt. Set by runCompactionImpl, drained + cleared by the loop
+   * after maybeCompact / runForcedCompaction so they surface even on no-op
+   * compactions. Undefined when no compaction ran this turn.
+   */
+  lastCompactionHookErrors?: HookErrorEvent[];
   /** Record that compaction retry was used this turn. */
   markCompactionUsed(): void;
 }

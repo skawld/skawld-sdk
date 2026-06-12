@@ -3,6 +3,7 @@ import {
   isAssistantEvent,
   isCompactionEvent,
   isErrorEvent,
+  isHookErrorEvent,
   isPartialAssistantEvent,
   isPermissionRequestEvent,
   isResultEvent,
@@ -75,6 +76,12 @@ describe("event type guards", () => {
         type: "error",
         error: { name: "ProviderError", message: "boom", retryable: false },
       },
+      hook_error: {
+        type: "hook_error",
+        hook_event: "PreToolUse",
+        message: "Hook failed: boom",
+        tool_use_id: "tu-1",
+      },
     };
 
     const guards: Array<[(e: Event) => boolean, string]> = [
@@ -89,6 +96,7 @@ describe("event type guards", () => {
       [isCompactionEvent, "compaction"],
       [isResultEvent, "result"],
       [isErrorEvent, "error"],
+      [isHookErrorEvent, "hook_error"],
     ];
 
     for (const [guard, key] of guards) {

@@ -17,7 +17,8 @@ export type Event =
   | SkillsLoadedEvent
   | SkillInvokedEvent
   | SkillCompletedEvent
-  | SubagentEvent;
+  | SubagentEvent
+  | HookErrorEvent;
 
 export interface SystemEvent {
   type: "system";
@@ -39,6 +40,13 @@ export interface AssistantEvent {
 export interface UserEvent {
   type: "user";
   message: Message;
+  /**
+   * Optional provenance of the user message. Omitted on plain phase-1 user
+   * events. `"stop_hook"` marks the system-reminder message a blocking Stop hook
+   * appended; `"steering"` is emitted by module 15. `"prompt"` / `"tool_result"`
+   * are reserved for the run prompt and aggregated tool results.
+   */
+  subtype?: "prompt" | "tool_result" | "steering" | "stop_hook";
 }
 
 export interface PartialAssistantEvent {
@@ -165,6 +173,22 @@ export interface SubagentEvent {
   event: Event;
 }
 
+/**
+ * Non-terminal event emitted when a hook throws, rejects, or exceeds its timeout.
+ * Unlike {@link ErrorEvent} it is NEVER followed by a {@link ResultEvent}: the run
+ * continues, and the failure's effect is already encoded in behavior (a PreToolUse
+ * deny, an unchanged tool result, a normal stop). Pure observability — may appear
+ * anywhere between the `system` and `result` events of a run.
+ */
+export interface HookErrorEvent {
+  type: "hook_error";
+  hook_event: "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "Stop" | "PreCompact";
+  /** Error message, or "Hook timed out after <n>ms". */
+  message: string;
+  /** Present for tool hooks (PreToolUse / PostToolUse). */
+  tool_use_id?: string;
+}
+
 export function isSystemEvent(e: Event): e is SystemEvent {
   return e.type === "system";
 }
@@ -209,4 +233,7 @@ export function isSkillCompletedEvent(e: Event): e is SkillCompletedEvent {
 }
 export function isSubagentEvent(e: Event): e is SubagentEvent {
   return e.type === "subagent_event";
+}
+export function isHookErrorEvent(e: Event): e is HookErrorEvent {
+  return e.type === "hook_error";
 }

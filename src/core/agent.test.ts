@@ -67,6 +67,15 @@ describe("Agent constructor", () => {
     expect(() => new Agent({ ...base, maxOutputTokens: -10 })).toThrow(ConfigError);
   });
 
+  it("throws ConfigError for invalid hook config and accepts valid hooks", () => {
+    const base = { provider: makeProvider(), model: "test-model" };
+    expect(() => new Agent({ ...base, hooks: { preToolUse: [{ matcher: "Bash" } as any] } })).toThrow(ConfigError);
+    expect(() => new Agent({ ...base, hooks: { stop: [{ timeoutMs: 0, hook: () => undefined }] } })).toThrow(ConfigError);
+    // A valid hook registration constructs and exposes a hookRunner.
+    const agent = new Agent({ ...base, hooks: { stop: [{ hook: () => undefined }] } });
+    expect(getAgentInternals(agent).hookRunner.hasStop).toBe(true);
+  });
+
   it("applies default values", () => {
     const store = new InMemorySessionStore();
     const agent = new Agent({ provider: makeProvider(), model: "my-model", sessionStore: store });

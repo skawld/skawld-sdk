@@ -87,3 +87,15 @@ export class SessionStoreError extends SkawldError {
   override readonly kind = "session_store";
   override readonly retryable = false;
 }
+
+/**
+ * A hook (PreToolUse / PostToolUse / UserPromptSubmit / Stop / PreCompact) threw,
+ * rejected, or timed out. Thrown to consumers in exactly one place: the rejection
+ * of a `steer()` promise whose message a UserPromptSubmit hook blocked (module 15).
+ * Hook failures inside a run are otherwise surfaced as the non-terminal
+ * `HookErrorEvent`, not by throwing.
+ */
+export class HookError extends SkawldError {
+  override readonly kind = "hook";
+  override readonly retryable = false;
+}

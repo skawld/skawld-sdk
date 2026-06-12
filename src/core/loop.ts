@@ -7,7 +7,7 @@ import { getAgentInternals } from "./agent.js";
 import { getSessionInternals } from "./session.js";
 import { maybeCompact, runForcedCompaction } from "./compaction.js";
 import { executeToolCalls } from "./scheduler.js";
-import type { Event, PartialAssistantEvent, CompactionEvent } from "./events.js";
+import type { Event, PartialAssistantEvent, CompactionEvent, HookErrorEvent } from "./events.js";
 import { wrapInSystemReminder } from "../skills/system-reminder.js";
 import { addUsage } from "./types.js";
 import type {
@@ -23,6 +23,7 @@ import type {
 import type { Session, RunOptions, SessionInternal } from "./session.js";
 import type { Agent, AgentInternal } from "./agent.js";
 import type { ProviderRequest, ProviderStreamEvent } from "../providers/base.js";
+import type { HookContext } from "./hooks.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -51,13 +52,19 @@ function buildUserMessage(
   prompt: string,
   images?: RunOptions["images"],
   skillListingText?: string,
+  additionalContext?: string[],
 ): Message {
   const envBlock: TextBlock = { type: "text", text: buildEnvUserPrefix() };
   const promptBlock: TextBlock = { type: "text", text: prompt };
+  // UserPromptSubmit additionalContext: system-reminder TextBlocks after the
+  // prompt block and before any image blocks.
+  const contextBlocks: TextBlock[] = (additionalContext ?? []).map(
+    (text) => ({ type: "text", text: wrapInSystemReminder(text) }),
+  );
   const imageBlocks: ImageBlock[] = (images ?? []).map(toImageBlock);
   const content: Message["content"] = [];
   if (skillListingText) content.push(skillListingBlock(skillListingText));
-  content.push(envBlock, promptBlock, ...imageBlocks);
+  content.push(envBlock, promptBlock, ...contextBlocks, ...imageBlocks);
   return { role: "user", content };
 }
 
@@ -100,6 +107,15 @@ function buildRequest(
 function buildCompactionEvent(si: SessionInternal): CompactionEvent {
   if (si.lastCompactionInfo) return si.lastCompactionInfo;
   throw new Error("invariant: lastCompactionInfo must be set after maybeCompact returns true");
+}
+
+// Yield + clear any HookErrorEvents the PreCompact hook produced during the
+// most recent compaction attempt. Shared by the threshold and forced paths so
+// failures surface even when the compaction itself was a no-op.
+function* drainCompactionHookErrors(si: SessionInternal): Generator<HookErrorEvent> {
+  const errors = si.lastCompactionHookErrors;
+  si.lastCompactionHookErrors = undefined;
+  if (errors) yield* errors;
 }
 
 // Re-inject the skill listing + any previously invoked skill bodies after a
@@ -255,7 +271,7 @@ async function* streamTurnWithContextRetry(
   opts: RunOptions,
   signal: AbortSignal,
   modelOverride?: ModelId,
-): AsyncGenerator<PartialAssistantEvent | CompactionEvent, { assistantMessage: Message; stopReason: StopReason; usage: Usage }> {
+): AsyncGenerator<PartialAssistantEvent | CompactionEvent | HookErrorEvent, { assistantMessage: Message; stopReason: StopReason; usage: Usage }> {
   const req = buildRequest(si, ai, opts, signal, modelOverride);
   try {
     return yield* streamTurn(ai.provider, req, ai.includePartialMessages);
@@ -264,7 +280,9 @@ async function* streamTurnWithContextRetry(
       si.markCompactionUsed();
       // If the strategy could not reduce the view, re-sending would only
       // reproduce the same ContextLengthError — surface the original instead.
-      if (!(await runForcedCompaction(si, ai, signal))) throw err;
+      const reduced = await runForcedCompaction(si, ai, signal);
+      yield* drainCompactionHookErrors(si);
+      if (!reduced) throw err;
       yield buildCompactionEvent(si);
       reinjectSkillContext(si, ai);
       // Retry uses the session's default model — the one-turn override is spent.
@@ -295,6 +313,10 @@ export async function* runLoop(
   const signal = anySignal([si.internalController.signal, opts.signal]);
   const startedAt = Date.now();
   let totalUsage: Usage = zeroUsage();
+  // True once a Stop hook has blocked at least once this run (passed back to the
+  // hook so it can self-bound an otherwise-unbounded continuation loop).
+  let stopHookActive = false;
+  const hookCtx = (): HookContext => ({ session_id: si.id, run_id: runId, cwd: ai.cwd, signal });
 
   // Emit SystemEvent first (before any side effects).
   // Tools come from the session's override (when set by the subagent runner)
@@ -338,11 +360,33 @@ export async function* runLoop(
   const isFirstUserMessage = si.providerView.length === 0;
   const listingForFirstTurn =
     isFirstUserMessage && si.toolsOverride === undefined ? ai.skillListingText : undefined;
-  const userMsg = buildUserMessage(prompt, opts.images, listingForFirstTurn);
 
   try {
+    // UserPromptSubmit — fires before the user message is built, persisted, or
+    // emitted. Top-level runs only (a subagent child's "prompt" is the parent
+    // model's tool input, governed by PreToolUse on the Subagent call). Fail-open.
+    let promptContext: string[] | undefined;
+    if (si.toolsOverride === undefined && ai.hookRunner.hasUserPromptSubmit) {
+      const res = await ai.hookRunner.runUserPromptSubmit({ prompt, source: "run", ctx: hookCtx() });
+      for (const e of res.errors) yield e;
+      if (res.blocked) {
+        // Blocked run prompt: nothing appended/emitted; the run ends in error.
+        yield { type: "error", error: { name: "HookError", message: res.blocked.reason, retryable: false } };
+        yield {
+          type: "result",
+          subtype: "error",
+          stop_reason: "error",
+          total_usage: totalUsage,
+          duration_ms: Date.now() - startedAt,
+        };
+        return;
+      }
+      promptContext = res.additionalContext;
+    }
+
     // Append inside the try so a store failure (SQLite locked, disk full)
     // surfaces as ErrorEvent + ResultEvent(error) rather than throwing raw.
+    const userMsg = buildUserMessage(prompt, opts.images, listingForFirstTurn, promptContext);
     await si.append([userMsg]);
     yield { type: "user", message: userMsg };
 
@@ -356,7 +400,9 @@ export async function* runLoop(
       si.compactionRetryUsedThisTurn = false;
 
       // Compact when projected token usage exceeds 80% of the context window.
-      if (await maybeCompact(si, ai, signal)) {
+      const didCompact = await maybeCompact(si, ai, signal);
+      yield* drainCompactionHookErrors(si);
+      if (didCompact) {
         yield buildCompactionEvent(si);
         reinjectSkillContext(si, ai);
       }
@@ -382,13 +428,41 @@ export async function* runLoop(
         yield { type: "usage", usage, cumulative: totalUsage };
 
         if (stopReason !== "tool_use") {
+          const finalText = extractFinalText(assistantMessage);
+
+          // Stop boundary. Module 15 inserts steering drain + interrupt check
+          // here, BEFORE the Stop hooks. Stop hooks fire only for top-level runs
+          // on the success path. A block appends a system-reminder user message
+          // and continues the loop (the continuation counts toward maxTurns).
+          // Fail-open. WARNING: a hook that unconditionally blocks loops forever
+          // under the default maxTurns: Infinity — use stop_hook_active to bound.
+          if (si.toolsOverride === undefined && ai.hookRunner.hasStop) {
+            const res = await ai.hookRunner.runStop({
+              stopReason,
+              ...(finalText !== undefined && { finalText }),
+              stopHookActive,
+              ctx: hookCtx(),
+            });
+            for (const e of res.errors) yield e;
+            if (res.blocked) {
+              stopHookActive = true;
+              const reminder: Message = {
+                role: "user",
+                content: [{ type: "text", text: wrapInSystemReminder(res.blocked.reason) }],
+              };
+              await si.append([reminder]);
+              yield { type: "user", message: reminder, subtype: "stop_hook" };
+              continue;
+            }
+          }
+
           yield {
             type: "result",
             subtype: "success",
             stop_reason: stopReason,
             total_usage: totalUsage,
             duration_ms: Date.now() - startedAt,
-            final_text: extractFinalText(assistantMessage),
+            final_text: finalText,
           };
           return;
         }

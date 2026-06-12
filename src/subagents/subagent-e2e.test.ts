@@ -90,7 +90,7 @@ interface E2ERig {
   store: InMemorySessionStore;
 }
 
-async function makeRig(opts?: { tools?: ToolRegistry }): Promise<E2ERig> {
+async function makeRig(opts?: { tools?: ToolRegistry; hooks?: import("../core/hooks.js").Hooks }): Promise<E2ERig> {
   const store = new InMemorySessionStore();
   const provider = new MockProvider();
   const capturedRequests: ProviderRequest[] = [];
@@ -107,6 +107,7 @@ async function makeRig(opts?: { tools?: ToolRegistry }): Promise<E2ERig> {
     configDir,
     tools: opts?.tools,
     permissions: { mode: "yolo" },
+    hooks: opts?.hooks,
   });
   return { agent, provider, capturedRequests, store };
 }
@@ -448,6 +449,55 @@ describe("subagent e2e — acceptance criteria from brainstorm summary", () => {
     expect(eventsMod.isSubagentEvent({ type: "system" } as never)).toBe(false);
     // sdk barrel is value-side only (re-exports are types); just ensure import resolves.
     expect(typeof sdkMod.Agent).toBe("function");
+  });
+
+  it("hook coverage matrix: PreToolUse/PostToolUse fire in child; UserPromptSubmit/Stop do not", async () => {
+    // A trivial read-scoped tool the child can call (auto-allowed).
+    const probe: import("../tools/base.js").Tool<Record<string, unknown>> = {
+      name: "Probe",
+      description: "probe",
+      scope: "read",
+      parallelSafe: true,
+      input_schema: { type: "object", properties: {}, required: [] },
+      validate: (raw) => raw,
+      async execute() { return { content: "ok", summary: "probe" }; },
+      summarize: () => "Probe()",
+    };
+    const tools = new ToolRegistry();
+    tools.register(probe);
+
+    const preCalls: Array<{ tool: string; session: string }> = [];
+    const postCalls: Array<{ tool: string; session: string }> = [];
+    const upsCalls: Array<{ source: string; session: string }> = [];
+    const stopCalls: string[] = [];
+    const rig = await makeRig({
+      tools,
+      hooks: {
+        preToolUse: [{ hook: (input, ctx) => { preCalls.push({ tool: input.tool_name, session: ctx.session_id }); } }],
+        postToolUse: [{ hook: (input, ctx) => { postCalls.push({ tool: input.tool_name, session: ctx.session_id }); } }],
+        userPromptSubmit: [{ hook: (input, ctx) => { upsCalls.push({ source: input.source, session: ctx.session_id }); } }],
+        stop: [{ hook: (_input, ctx) => { stopCalls.push(ctx.session_id); } }],
+      },
+    });
+
+    // parent: Subagent → ... → text ; child: Probe → text
+    rig.provider.enqueue(toolCallTurn({ toolUseId: "tu-1", toolName: "Subagent", input: { description: "go", prompt: "probe it" } }));
+    rig.provider.enqueue(toolCallTurn({ toolUseId: "ctu-1", toolName: "Probe", input: {} }));
+    rig.provider.enqueue(textTurn("child done"));
+    rig.provider.enqueue(textTurn("parent done"));
+
+    const session = await rig.agent.session();
+    await collectEvents(session.run("start"));
+
+    // PreToolUse/PostToolUse fire tree-wide: parent's Subagent + child's Probe.
+    expect(preCalls.map(c => c.tool).sort()).toEqual(["Probe", "Subagent"]);
+    expect(postCalls.map(c => c.tool).sort()).toEqual(["Probe", "Subagent"]);
+    const probePre = preCalls.find(c => c.tool === "Probe")!;
+    expect(probePre.session).not.toBe(session.id); // ran in the child session
+
+    // UserPromptSubmit + Stop fire for the top-level run only.
+    expect(upsCalls).toEqual([{ source: "run", session: session.id }]);
+    expect(stopCalls).toEqual([session.id]);
   });
 });
 

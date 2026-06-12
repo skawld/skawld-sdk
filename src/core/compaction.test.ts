@@ -34,7 +34,11 @@ function buildHistory(assistantCount: number): Message[] {
   return msgs;
 }
 
-function makeAgent(provider: MockProvider, opts?: { maxOutputTokens?: number; compaction?: CompactionStrategy }) {
+function makeAgent(provider: MockProvider, opts?: {
+  maxOutputTokens?: number;
+  compaction?: CompactionStrategy;
+  hooks?: import("./hooks.js").Hooks;
+}) {
   const store = new InMemorySessionStore();
   const agent = new Agent({
     provider,
@@ -42,6 +46,7 @@ function makeAgent(provider: MockProvider, opts?: { maxOutputTokens?: number; co
     sessionStore: store,
     maxOutputTokens: opts?.maxOutputTokens ?? 8192,
     compaction: opts?.compaction,
+    hooks: opts?.hooks,
   });
   return { agent, store };
 }
@@ -579,6 +584,98 @@ describe("runForcedCompaction", () => {
 
     expect(si.providerView.length).toBeLessThan(history.length);
     expect(si.lastCompactionInfo!.tokens_before).toBe(0); // 0 when no prior usage
+
+    await agent.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PreCompact hook
+// ---------------------------------------------------------------------------
+
+describe("PreCompact hook", () => {
+  it("fires with 'threshold' trigger from maybeCompact and stashes hook errors", async () => {
+    const provider = new MockProvider();
+    provider.enqueue({
+      events: [
+        { type: "message_start", model: "test-model" },
+        { type: "text_delta", text: "summary" },
+        { type: "message_end", stop_reason: "end_turn", usage: { input_tokens: 100, output_tokens: 5 } },
+      ],
+    });
+    const seen: Array<{ trigger: string; messages_before: number; tokens_before: number }> = [];
+    const { agent } = makeAgent(provider, {
+      maxOutputTokens: 8192,
+      hooks: { preCompact: [
+        { hook: (input) => { seen.push(input); } },
+        { hook: () => { throw new Error("pc boom"); } },
+      ] },
+    });
+    const session = await agent.session();
+    const si = getSessionInternals(session);
+    const ai = getAgentInternals(agent);
+
+    const history = buildHistory(15);
+    si.providerView.length = 0;
+    for (const m of history) si.providerView.push(m);
+    si.lastUsage = { input_tokens: 155_000, output_tokens: 500, cache_read_tokens: 0, cache_creation_tokens: 0 };
+
+    const result = await maybeCompact(si, ai, new AbortController().signal);
+    expect(result).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.trigger).toBe("threshold");
+    expect(seen[0]!.messages_before).toBe(history.length);
+    expect(seen[0]!.tokens_before).toBe(155_000);
+    expect(si.lastCompactionHookErrors![0]!.hook_event).toBe("PreCompact");
+    expect(si.lastCompactionHookErrors![0]!.message).toBe("pc boom");
+
+    await agent.close();
+  });
+
+  it("fires with 'forced' trigger from runForcedCompaction", async () => {
+    const provider = new MockProvider();
+    provider.enqueue({
+      events: [
+        { type: "message_start", model: "test-model" },
+        { type: "text_delta", text: "forced summary" },
+        { type: "message_end", stop_reason: "end_turn", usage: { input_tokens: 50, output_tokens: 5 } },
+      ],
+    });
+    const seen: Array<{ trigger: string }> = [];
+    const { agent } = makeAgent(provider, {
+      hooks: { preCompact: [{ hook: (input) => { seen.push(input); } }] },
+    });
+    const session = await agent.session();
+    const si = getSessionInternals(session);
+    const ai = getAgentInternals(agent);
+    si.lastUsage = { input_tokens: 1000, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 };
+    const history = buildHistory(15);
+    si.providerView.length = 0;
+    for (const m of history) si.providerView.push(m);
+
+    await runForcedCompaction(si, ai, new AbortController().signal);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.trigger).toBe("forced");
+    expect(si.lastCompactionHookErrors).toEqual([]); // no hook errors
+
+    await agent.close();
+  });
+
+  it("does not fire when the threshold is not crossed", async () => {
+    const provider = new MockProvider();
+    let fired = false;
+    const { agent } = makeAgent(provider, {
+      maxOutputTokens: 8192,
+      hooks: { preCompact: [{ hook: () => { fired = true; } }] },
+    });
+    const session = await agent.session();
+    const si = getSessionInternals(session);
+    const ai = getAgentInternals(agent);
+    si.lastUsage = { input_tokens: 1000, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 };
+
+    const result = await maybeCompact(si, ai, new AbortController().signal);
+    expect(result).toBe(false);
+    expect(fired).toBe(false);
 
     await agent.close();
   });

@@ -27,19 +27,28 @@ export type {
   ToolCallStartEvent, ToolCallEndEvent, PermissionRequestEvent, UsageEvent,
   CompactionEvent, ResultEvent, ErrorEvent,
   SkillsLoadedEvent, SkillInvokedEvent, SkillCompletedEvent,
-  SubagentEvent,
+  SubagentEvent, HookErrorEvent,
 } from "./core/events.js";
 
-// Event guard for subagent-aware UI consumers (filter parent's event stream
-// by `subagent_run_id`). The other isXxx guards aren't promised public surface;
-// add them here if/when consumers ask.
-export { isSubagentEvent } from "./core/events.js";
+// Event guards for subagent- and hook-aware UI consumers. The other isXxx
+// guards aren't promised public surface; add them here if/when consumers ask.
+export { isSubagentEvent, isHookErrorEvent } from "./core/events.js";
+
+// Hooks: Agent-level interception points (passed via AgentOptions.hooks).
+export type {
+  Hooks, HookRegistration, HookContext,
+  PreToolUseHook, PreToolUseHookInput, PreToolUseHookOutcome,
+  PostToolUseHook, PostToolUseHookInput, PostToolUseHookOutcome,
+  UserPromptSubmitHook, UserPromptSubmitHookInput, UserPromptSubmitHookOutcome,
+  StopHook, StopHookInput, StopHookOutcome,
+  PreCompactHook, PreCompactHookInput,
+} from "./core/hooks.js";
 
 // Errors.
 export {
   SkawldError, AuthError, RateLimitError, ContextLengthError,
   PermissionDeniedError, ToolExecutionError, AbortError, ProviderError, ConfigError,
-  SkillError,
+  SkillError, HookError,
 } from "./core/errors.js";
 
 // Compaction strategy (importable from the main entry for ergonomics).
