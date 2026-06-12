@@ -14,7 +14,7 @@ import type { Event } from "../core/events.js";
 import type { SessionInternal } from "../core/session.js";
 import type { AgentDefinition } from "./types.js";
 
-const SUBAGENT_TOOL_NAME = "Subagent";
+const EXCLUDED_CHILD_TOOLS = new Set(["Subagent", "AskUser"]);
 
 export interface RunSubagentArgs {
   /** Parent Session's internals — provides the agent reference + identity. */
@@ -67,7 +67,7 @@ export function buildChildTools(
   const wildcard = filter === undefined || filter.includes("*");
   const wanted = wildcard ? undefined : new Set(filter);
   for (const t of parent.list()) {
-    if (t.name === SUBAGENT_TOOL_NAME) continue;
+    if (EXCLUDED_CHILD_TOOLS.has(t.name)) continue;
     if (wanted === undefined || wanted.has(t.name)) child.register(t);
   }
   return child;

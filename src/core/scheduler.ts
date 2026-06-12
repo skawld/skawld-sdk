@@ -192,6 +192,7 @@ async function safeExecute(
       fileReadTracker: si.fileReadTracker,
       sessionId: si.id,
       runId: si.activeRunId ?? "unknown",
+      toolUseId: call.id,
       sessionStore: ai.getStore(),
       ...(emit !== undefined && { emit }),
     };

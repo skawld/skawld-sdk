@@ -32,6 +32,8 @@ import { buildAgentRegistry } from "../subagents/registry.js";
 import { loadAgentsFromDir } from "../subagents/loader.js";
 import type { AgentRegistry } from "../subagents/registry.js";
 import type { SessionInternal } from "./session.js";
+import { AskUserTool } from "../tools/ask-user.js";
+import type { AskUserHandler } from "../tools/ask-user.js";
 
 export interface AgentOptions {
   /** LLM provider. Required. */
@@ -103,6 +105,12 @@ export interface AgentOptions {
    * spec_docs/phase-02/14-hooks.html.
    */
   hooks?: Hooks;
+  /**
+   * Handler invoked when the model calls the AskUser tool. When provided, the
+   * Agent registers AskUserTool at construction; when omitted, the tool is not
+   * advertised and the model cannot call it.
+   */
+  askUser?: AskUserHandler;
 }
 
 /** Internal state accessible to the loop and scheduler (Phase 3+). */
@@ -222,6 +230,11 @@ export class Agent {
         toolNames,
         permissionMode: permMode,
       });
+
+    // Eager, synchronous registration — nothing to load, no I/O.
+    if (opts.askUser) {
+      tools.register(new AskUserTool(opts.askUser));
+    }
 
     const systemBlocks = buildBlocks(tools.list().map(t => t.name).sort());
 

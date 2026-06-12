@@ -40,6 +40,13 @@ export interface ToolContext {
   sessionId: string;
   /** Run id, for logging/correlation. */
   runId: string;
+  /**
+   * The tool_use block id of this call — matches the tool_use_id carried by
+   * ToolCallStartEvent/ToolCallEndEvent for the same call. Always set by the
+   * scheduler; optional only so hand-built contexts (tests, direct invocation)
+   * remain valid.
+   */
+  toolUseId?: string;
   /** Persistent session store. Task tools use this for session-scoped task state. */
   sessionStore: SessionStore;
   /**

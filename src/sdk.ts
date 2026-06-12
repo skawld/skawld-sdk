@@ -44,6 +44,12 @@ export type {
   PreCompactHook, PreCompactHookInput,
 } from "./core/hooks.js";
 
+// AskUser tool types (for consumers wiring their own handler).
+export type {
+  AskUserHandler, AskUserRequest, AskUserResponse, AskUserAnswer,
+  AskUserInput, AskUserQuestion, AskUserOption,
+} from "./tools/ask-user.js";
+
 // Errors.
 export {
   SkawldError, AuthError, RateLimitError, ContextLengthError,

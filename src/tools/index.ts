@@ -22,6 +22,13 @@ export { TaskUpdateTool } from "./task-update.js";
 // Task persistence types (re-exported for tool authors / consumers).
 export type { Task, TaskStatus, CreateTaskInput, TaskPatch } from "../sessions/tasks.js";
 
+// AskUser tool (registered conditionally via AgentOptions.askUser).
+export { AskUserTool } from "./ask-user.js";
+export type {
+  AskUserHandler, AskUserRequest, AskUserResponse, AskUserAnswer,
+  AskUserInput, AskUserQuestion, AskUserOption,
+} from "./ask-user.js";
+
 // MCP client support.
 export { connectMcpServers, makeMcpTool, buildMcpToolName, normalizeNameForMcp } from "./mcp/index.js";
 export type {
