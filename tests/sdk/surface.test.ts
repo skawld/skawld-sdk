@@ -13,7 +13,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { Agent, defaultTools, SkawldError, AuthError } from "../../src/sdk.js";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { Agent, defaultTools, SkawldError, AuthError, loadConfig } from "../../src/sdk.js";
+import type { LoadedConfig, SkawldConfig, ConfigWarning } from "../../src/sdk.js";
 import { InMemorySessionStore } from "../../src/sessions/index.js";
 import { ToolRegistry } from "../../src/tools/index.js";
 import type { CanUseTool } from "../../src/permissions/index.js";
@@ -159,5 +163,22 @@ describe("SDK surface — fast source layer", () => {
 
   test("errors: typed error classes extend SkawldError", () => {
     expect(new AuthError("x")).toBeInstanceOf(SkawldError);
+  });
+
+  test("config: loadConfig from main entry merges a project file", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "skawld-surface-cfg-"));
+    try {
+      const skawldDir = path.join(root, ".skawld");
+      mkdirSync(skawldDir, { recursive: true });
+      const cfg: SkawldConfig = { model: "claude-sonnet-4-6", provider: { id: "anthropic" } };
+      writeFileSync(path.join(skawldDir, "config.json"), JSON.stringify(cfg));
+
+      const loaded: LoadedConfig = await loadConfig({ cwd: root, env: { HOME: root } });
+      expect(loaded.config.model).toBe("claude-sonnet-4-6");
+      const warnings: ConfigWarning[] = loaded.warnings;
+      expect(Array.isArray(warnings)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

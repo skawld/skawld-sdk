@@ -44,3 +44,8 @@ export {
 
 // Compaction strategy (importable from the main entry for ergonomics).
 export type { CompactionStrategy } from "./core/compaction.js";
+
+// Config-file loading (opt-in; the SDK never calls loadConfig automatically).
+export { loadConfig } from "./config/loader.js";
+export type { LoadConfigOptions, LoadedConfig } from "./config/loader.js";
+export type { SkawldConfig, ConfigWarning } from "./config/schema.js";

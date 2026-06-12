@@ -23,6 +23,7 @@ describe.skipIf(!distTestEnabled)("SDK surface — dist layer (published specifi
     expect(typeof sdk.Session).toBe("function");
     expect(typeof sdk.defaultTools).toBe("function");
     expect(typeof sdk.SkawldError).toBe("function");
+    expect(typeof sdk.loadConfig).toBe("function");
     // defaultTools() builds a usable registry.
     const names = sdk.defaultTools().list().map((t: { name: string }) => t.name);
     expect(names).toContain("Read");
