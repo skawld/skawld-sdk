@@ -43,10 +43,9 @@ export interface UserEvent {
   /**
    * Optional provenance of the user message. Omitted on plain phase-1 user
    * events. `"stop_hook"` marks the system-reminder message a blocking Stop hook
-   * appended; `"steering"` is emitted by module 15. `"prompt"` / `"tool_result"`
-   * are reserved for the run prompt and aggregated tool results.
+   * appended; `"steering"` is emitted by module 15.
    */
-  subtype?: "prompt" | "tool_result" | "steering" | "stop_hook";
+  subtype?: "steering" | "stop_hook";
 }
 
 export interface PartialAssistantEvent {

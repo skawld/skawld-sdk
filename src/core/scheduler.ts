@@ -419,6 +419,7 @@ export async function* executeToolCalls(
   if (ai.hookRunner.hasPreToolUse) {
     const ctx = hookContextOf(ai, si, signal);
     for (let i = 0; i < resolved.length; i++) {
+      throwIfAborted(signal);
       const call = resolved[i]!;
       if (call.isImmediateError) continue;
       const res = await ai.hookRunner.runPreToolUse({
