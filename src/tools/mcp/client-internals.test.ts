@@ -2,11 +2,12 @@
  * Unit tests for the pure helpers behind connectMcpServers:
  *   - listAllTools follows pagination cursors (G2)
  *   - findQualifiedNameProblems detects collisions + over-length names (G3/G9)
+ *   - stdioChildEnv defaults to the safe env subset, full env only on opt-in
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Tool as McpToolDefinition } from "@modelcontextprotocol/sdk/types.js";
-import { listAllTools, findQualifiedNameProblems } from "./client.js";
+import { listAllTools, findQualifiedNameProblems, stdioChildEnv } from "./client.js";
 
 function tool(name: string): McpToolDefinition {
   return { name, inputSchema: { type: "object" } } as McpToolDefinition;
@@ -68,5 +69,47 @@ describe("findQualifiedNameProblems", () => {
     expect(
       findQualifiedNameProblems([{ name: "srv", mcpTools: [tool("a"), tool("b")] }]),
     ).toEqual([]);
+  });
+});
+
+describe("stdioChildEnv", () => {
+  const SECRET = "SKAWLD_TEST_FAKE_SECRET";
+
+  beforeEach(() => {
+    process.env[SECRET] = "hunter2";
+  });
+
+  afterEach(() => {
+    delete process.env[SECRET];
+  });
+
+  test("default: host secrets are excluded, safe subset is included", () => {
+    const env = stdioChildEnv({ command: "srv" });
+    expect(env[SECRET]).toBeUndefined();
+    // The child still needs to find executables.
+    expect(env.PATH).toBe(process.env.PATH!);
+  });
+
+  test("inheritEnv: true passes the full host env", () => {
+    const env = stdioChildEnv({ command: "srv", inheritEnv: true });
+    expect(env[SECRET]).toBe("hunter2");
+  });
+
+  test("explicit env entries win over the inherited base", () => {
+    const base = stdioChildEnv({ command: "srv", env: { PATH: "/custom/bin" } });
+    expect(base.PATH).toBe("/custom/bin");
+
+    const full = stdioChildEnv({
+      command: "srv",
+      inheritEnv: true,
+      env: { [SECRET]: "overridden" },
+    });
+    expect(full[SECRET]).toBe("overridden");
+  });
+
+  test("explicit env can pass an individual host secret without full inheritance", () => {
+    const env = stdioChildEnv({ command: "srv", env: { [SECRET]: process.env[SECRET]! } });
+    expect(env[SECRET]).toBe("hunter2");
+    expect(env.SOME_OTHER_HOST_VAR).toBeUndefined();
   });
 });

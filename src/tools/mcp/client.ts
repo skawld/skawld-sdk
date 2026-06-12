@@ -8,14 +8,14 @@
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult, Tool as McpToolDefinition } from "@modelcontextprotocol/sdk/types.js";
 import type { Tool } from "../base.js";
 import { ConfigError } from "../../core/errors.js";
 import { SKAWLD_VERSION } from "../../core/version.js";
-import { type McpServerConfig, mcpServerType } from "./config.js";
+import { type McpServerConfig, type McpStdioServerConfig, mcpServerType } from "./config.js";
 import { buildMcpToolName, normalizeNameForMcp } from "./naming.js";
 import { makeMcpTool } from "./tool.js";
 
@@ -30,6 +30,19 @@ export interface McpConnection {
   close(): Promise<void>;
 }
 
+/**
+ * Environment for a stdio child process. The base is the MCP SDK's safe
+ * subset (HOME, PATH, SHELL, …) so host secrets are not handed to every
+ * server child; `inheritEnv: true` opts into the full host env. Explicit
+ * `env` entries win over the base either way.
+ */
+export function stdioChildEnv(stdio: McpStdioServerConfig): Record<string, string> {
+  const base = stdio.inheritEnv
+    ? (process.env as Record<string, string>)
+    : getDefaultEnvironment();
+  return { ...base, ...(stdio.env ?? {}) };
+}
+
 function createTransport(config: McpServerConfig): Transport {
   if (mcpServerType(config) === "http") {
     const http = config as Extract<McpServerConfig, { type: "http" }>;
@@ -37,11 +50,11 @@ function createTransport(config: McpServerConfig): Transport {
       requestInit: http.headers ? { headers: http.headers } : undefined,
     });
   }
-  const stdio = config as Extract<McpServerConfig, { type?: "stdio" }>;
+  const stdio = config as McpStdioServerConfig;
   return new StdioClientTransport({
     command: stdio.command,
     args: stdio.args ?? [],
-    env: { ...(process.env as Record<string, string>), ...(stdio.env ?? {}) },
+    env: stdioChildEnv(stdio),
     // Inherit so the child's diagnostics reach our stderr and no unread pipe
     // can fill and block a chatty server.
     stderr: "inherit",

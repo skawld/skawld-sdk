@@ -14,8 +14,15 @@ export interface McpStdioServerConfig {
   command: string;
   /** Arguments passed to the command. */
   args?: string[];
-  /** Extra environment variables, merged over the inherited process env. */
+  /** Extra environment variables, merged over the inherited base (see `inheritEnv`). */
   env?: Record<string, string>;
+  /**
+   * Inherit the full host `process.env` instead of the MCP SDK's safe subset
+   * (HOME, PATH, SHELL, TERM, USER, LOGNAME). Off by default so host secrets
+   * (API keys, tokens) don't leak into every server child process; pass
+   * individual variables via `env` instead.
+   */
+  inheritEnv?: boolean;
   /** Per-call timeout in ms. Omit to use the SDK default (60s). */
   timeoutMs?: number;
 }
