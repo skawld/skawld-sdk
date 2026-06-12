@@ -1,6 +1,6 @@
 {
   "name": "@skawld/agent-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "An open-source TypeScript agent harness for software engineering.",
   "type": "module",
   "license": "MIT",
