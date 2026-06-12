@@ -8,6 +8,7 @@ All notable changes to `@skawld/agent-sdk` are documented here.
 
 - **AskUser tool** — Agents can now pause mid-run to elicit structured input from the user. Supports single-select, multi-select, and free-text responses with a 1–4 question format, option validation, and graceful decline handling.
 - **Hooks system** — Introduced a first-class hook API (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `PreCompact`) that allows consumers to intercept, modify, or block agent actions at runtime without modifying core loop logic.
+- **Steering & interruption** — Added `Session.steer()` and `Session.interrupt()` for active-run control. `steer()` injects a user message at the next turn boundary without aborting the run; `interrupt()` ends the current run cleanly while preserving all in-flight turn state.
 
 ### Improved
 
