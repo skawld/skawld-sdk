@@ -58,6 +58,62 @@ new Agent({ provider, model, permissions: { mode: "default", canUseTool } });
 - If `canUseTool` is **absent** and a tool resolves to `"ask"`, the call is auto-denied with a clear reason. So in `"default"` mode you almost always need either rules or a callback.
 - The callback receives an `AbortSignal`; honor it for cancellable prompts.
 
+## Hooks
+
+📖 Docs: https://skawld.com/docs/configuration
+
+Hooks are typed, in-process interception points the engine calls at five named moments. Pass them via `AgentOptions.hooks`; each event takes an array of registrations evaluated in order. Hooks are pure functions — no I/O assumptions — and must respect `ctx.signal`.
+
+```ts
+import type { Hooks } from "@skawld/agent-sdk";
+
+const hooks: Hooks = {
+  preToolUse: [
+    {
+      matcher: "Bash",                       // exact name or glob ("mcp__github__*", "*"); omit = all tools
+      timeoutMs: 5_000,                      // per-hook timeout; default 60_000
+      hook: (input, ctx) => {
+        // input: { tool_name, tool_use_id, input, summary }; ctx: { session_id, run_id, cwd, signal }
+        if (/rm\s+-rf/.test(String(input.input.command))) {
+          return { action: "deny", reason: "destructive command blocked" };
+        }
+        // other outcomes: { action: "allow" } | { action: "ask" }
+        //                 | { action: "continue", updatedInput: {...} }  // rewrite, re-validated
+      },
+    },
+  ],
+  postToolUse: [
+    { hook: (input) => ({ additionalContext: `linted ${input.tool_name}` }) },  // feed text back to the model
+  ],
+  userPromptSubmit: [
+    { hook: ({ prompt, source }) => source === "steer" ? { action: "continue" } : undefined },
+    // also: { action: "block", reason } to reject the prompt
+  ],
+  stop: [
+    { hook: ({ stop_reason, stop_hook_active }) => undefined },  // { action: "block", reason } forces another turn
+  ],
+  preCompact: [
+    { hook: ({ trigger, messages_before, tokens_before }) => { /* observational only */ } },
+  ],
+};
+
+new Agent({ provider, model, hooks });
+```
+
+Per-event semantics:
+
+| Event | When | Outcome (per hook) | Failure policy |
+|---|---|---|---|
+| `preToolUse` | before a tool runs (after `validate`, after permission resolution) | `deny` > `ask` > `allow` > `continue`; `updatedInput` rewrites & re-validates | **fail-closed** (throw/timeout → deny) |
+| `postToolUse` | after a tool returns | `additionalContext` strings appended to the result | fail-open |
+| `userPromptSubmit` | on each `run()` prompt and each `steer()` injection (`source` distinguishes) | first `block` wins; `additionalContext` accumulates | fail-open |
+| `stop` | when a turn would end the run | first `block` forces another turn (`stop_hook_active` guards loops) | fail-open |
+| `preCompact` | before compaction (`trigger: "threshold"\|"forced"`) | observational — return value ignored | fail-open |
+
+- `matcher` only applies to `preToolUse`/`postToolUse`. Glob `*` matches any run of characters; case-sensitive.
+- A hook that throws or exceeds `timeoutMs` emits a `hook_error` event (`isHookErrorEvent(e)`). For `preToolUse` that also denies the call; elsewhere the engine continues.
+- Invalid hook config (non-array, bad `timeoutMs`, missing `hook` function) throws `ConfigError` from the `Agent` constructor.
+
 ## Sessions & stores
 
 📖 Docs: https://skawld.com/docs/sessions
@@ -127,6 +183,31 @@ Tool authoring rules:
 - **`execute`** must respect `ctx.signal` and stop ASAP when aborted.
 - `ToolResult.content` is a string or an array of text/image blocks; set `is_error: true` to signal a failed call to the model.
 - Build a fresh registry with `new ToolRegistry()` (also from `/tools`) to fully control the tool set instead of starting from `defaultTools()`.
+
+## AskUser tool
+
+📖 Docs: https://skawld.com/docs/tools
+
+The `AskUser` tool lets the model pause mid-run to ask the user clarifying questions (ambiguous requirements, multiple valid approaches, missing context, risky choices). It is registered **only** when you pass an `askUser` handler in `AgentOptions` — the embedding app owns how the questions are presented.
+
+```ts
+import type { AskUserHandler } from "@skawld/agent-sdk";
+
+const askUser: AskUserHandler = async (req, signal) => {
+  // req: { tool_use_id, questions[] }
+  // each question: { question, header (≤12 chars), options[{ label, description? }], multi_select }
+  const answers = await promptUserSomehow(req.questions, signal);   // your UI
+  return { answers: answers.map((selected) => ({ selected })) };    // selected: string[] of labels and/or free text
+  // or decline: return { declined: true, reason: "user cancelled" };
+};
+
+new Agent({ provider, model, askUser });
+```
+
+- Each call carries 1–4 questions, each with 2–4 options. With `multi_select: false`, an answer's `selected` has exactly one entry; with `true`, one or more.
+- The user can always answer with free text instead of picking an option — never expect an "Other" option in the question set.
+- Returning `{ declined: true }` tells the model the user opted out; the run continues.
+- The handler receives the run's `AbortSignal`; honor it for cancellable prompts.
 
 ## MCP servers
 

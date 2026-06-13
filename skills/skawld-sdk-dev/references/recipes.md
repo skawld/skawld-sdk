@@ -241,6 +241,64 @@ await agent.close();
 
 To test tool-calling flows, emit `tool_use_start` / `tool_use_input_delta` / `tool_use_end` on the first turn (`stop_reason: "tool_use"`), then a second scripted turn for after the tool result. To test permissions, supply a `canUseTool` that returns canned decisions and assert on `permission_request` / `tool_call_end.is_error`.
 
+## 12. Steer & interrupt an active run
+
+`steer()` injects a message without aborting; `interrupt()` stops gracefully after the current turn. Both require an active run.
+
+```ts
+const session = await agent.session();
+const iter = session.run("Refactor the auth module.");
+
+// Inject extra guidance mid-run — resolves once it's appended as a user message.
+setTimeout(() => {
+  session.steer("Also keep the public API backward-compatible.").catch(() => {
+    /* rejects with AbortError if the run ends first, or HookError if a userPromptSubmit hook blocks it */
+  });
+}, 1000);
+
+// Ask the run to wind down cleanly after the current turn.
+setTimeout(() => session.interrupt(), 5000);
+
+for await (const event of iter) {
+  if (event.type === "user" && event.subtype === "steering") console.log("[steered in]");
+  if (event.type === "result") {
+    console.log(event.subtype);   // "interrupted" once interrupt() takes effect
+    break;
+  }
+}
+```
+
+`abort()` is still the immediate, hard cancel; `interrupt()` lets the in-flight turn and its tool calls finish and persist first.
+
+## 13. Hooks + AskUser
+
+Wire `hooks` to gate/observe tool calls and `askUser` to let the model ask the user clarifying questions:
+
+```ts
+import type { Hooks, AskUserHandler } from "@skawld/agent-sdk";
+
+const hooks: Hooks = {
+  preToolUse: [{
+    matcher: "Bash",
+    hook: ({ input }) =>
+      /rm\s+-rf/.test(String(input.command)) ? { action: "deny", reason: "blocked" } : undefined,
+  }],
+  postToolUse: [{ hook: ({ tool_name }) => ({ additionalContext: `ran ${tool_name}` }) }],
+};
+
+const askUser: AskUserHandler = async (req) => ({
+  answers: req.questions.map((q) => ({ selected: [q.options[0].label] })),   // your UI here
+  // or: return { declined: true };
+});
+
+const agent = new Agent({ provider, model, hooks, askUser });
+
+for await (const e of (await agent.session()).run("Set up the project the way I'd want.")) {
+  if (e.type === "hook_error") console.warn(`[hook ${e.hook_event}] ${e.message}`);
+  if (e.type === "result") break;
+}
+```
+
 ## Gotchas
 
 - **No default model** — always pass `model`.

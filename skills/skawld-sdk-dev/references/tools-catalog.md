@@ -94,6 +94,16 @@ interface Task {
 
 Embedding apps can also read/write tasks directly through the `SessionStore` (`createTask`, `getTask`, `listTasks`, `updateTask`, `deleteTask`) — useful for rendering a live task panel alongside the agent. See `building-agents.md` → Sessions.
 
+## Conditionally-registered tools
+
+These are **not** part of `defaultTools()` — the engine registers them only when the corresponding capability is configured:
+
+| Tool | Registered when | Purpose |
+|---|---|---|
+| `AskUser` | `AgentOptions.askUser` handler is provided | Pause mid-run to ask the user 1–4 clarifying questions (single/multi-select + free text). See `building-agents.md` → AskUser. |
+| `Skill` | one or more skills are loaded from `<configDir>/skills` | Lets the model invoke a skill. See `building-agents.md` → Skills. |
+| `Subagent` | always on first `session()` (a built-in default agent exists) | Spawn a child session. See `building-agents.md` → Subagents. |
+
 ## Removing or restricting tools
 
 - Start from `new ToolRegistry()` (from `@skawld/agent-sdk/tools`) and register only what you want, instead of `defaultTools()`.

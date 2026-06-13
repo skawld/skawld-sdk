@@ -29,12 +29,16 @@ interface AgentOptions {
   maxTurns?: number;                      // hard cap on turns/run; default Infinity → TurnLimitError result on hit
   cacheTtl?: "5m" | "1h";                 // Anthropic prompt-cache TTL hint; default "5m"
   configDir?: string;                     // dir for skills/agents; default ".skawld" resolved vs cwd
+  hooks?: Hooks;                          // typed interception points; see building-agents.md → Hooks
+  askUser?: AskUserHandler;               // enables the AskUser tool; see building-agents.md → AskUser
 }
 ```
 
 - **`maxOutputTokens` omitted**: OpenAI providers omit `max_tokens` from the wire (API default applies); Anthropic falls back to `32768` because its API requires the field.
 - **`mcpServers`** connect lazily on the first `session()` and disconnect on `close()`. A connect failure throws from `session()`.
 - **`systemPrompt`** is APPENDED — the cache-optimized default prompt stays intact. Dynamic content (date, etc.) lives in the first user message, not the system prompt.
+- **`hooks`** registers typed interception points (`preToolUse`, `postToolUse`, `userPromptSubmit`, `stop`, `preCompact`). Invalid config throws `ConfigError` from the constructor. See `building-agents.md` → Hooks.
+- **`askUser`** wires a handler for the `AskUser` tool; the tool is registered only when this is present. See `building-agents.md` → AskUser.
 
 ## Agent methods
 
@@ -62,6 +66,8 @@ class Session {
 
   run(prompt: string, opts?: RunOptions): AsyncIterable<Event>;  // throws ConfigError if a run is active
   abort(reason?: unknown): void;          // cancels active run → next event is result(subtype:"aborted"); idempotent
+  steer(prompt: string, opts?: { images?: RunOptions["images"] }): Promise<void>;  // inject a user message mid-run
+  interrupt(): void;                      // graceful stop → result(subtype:"interrupted"); idempotent, no-op when idle
   updateMeta(patch: Record<string, unknown>): Promise<void>;     // shallow-merge into stored meta
 }
 
@@ -76,6 +82,9 @@ interface RunOptions {
 ```
 
 `run()` returns a fresh async iterator each call. Breaking out of the `for await` (or letting it be GC'd) cleans up the active-run state automatically.
+
+- **`steer()`** queues a user message (FIFO) for injection at the next turn boundary as a real persisted user message — the run keeps going, it is not aborted. Throws `ConfigError` synchronously when no run is active. The returned promise resolves once the message is appended and its `UserEvent` emitted; it rejects with `AbortError` if the run ends first, or `HookError` if a `userPromptSubmit` hook blocks that message.
+- **`interrupt()`** requests a graceful stop: the current turn and its in-flight tool calls finish and persist, then the run ends with `result` subtype `"interrupted"` instead of starting another model turn. Use `abort()` for an immediate cancel of an in-flight stream.
 
 ## Event union
 
@@ -94,14 +103,15 @@ interface RunOptions {
 | `permission_request` | `requests[]` (`tool_use_id`, `tool_name`, `input`, `summary`) | Tool(s) need approval |
 | `usage` | `usage`, `cumulative` | Token usage for the turn + running total |
 | `compaction` | `messages_before/after`, `tokens_before`, `tokens_after`(=0), `strategy` | History was compacted |
-| `result` | `subtype:"success"\|"aborted"\|"error"`, `stop_reason`, `total_usage`, `duration_ms`, `final_text?` | Run finished — terminal event |
+| `result` | `subtype:"success"\|"aborted"\|"error"\|"interrupted"`, `stop_reason`, `total_usage`, `duration_ms`, `final_text?` | Run finished — terminal event (`"interrupted"` after `session.interrupt()`) |
 | `error` | `error` (`name`, `message`, `retryable`, `cause?`) | An error surfaced |
+| `hook_error` | `hook_event` (`"PreToolUse"`\|`"PostToolUse"`\|…), `message`, `tool_use_id?` | A registered hook threw or timed out |
 | `skills_loaded` | `skills[]` | Skills available this session |
 | `skill_invoked` | `name`, `args?`, `model_override?`, `allowed_tools?` | Model invoked a skill |
 | `skill_completed` | `name`, `is_error` | Skill turn ended |
 | `subagent_event` | `parent_session_id`, `subagent_run_id`, `subagent_type`, `display_name`, `event` | Wraps a child-session event (may nest) |
 
-Guard helper: `isSubagentEvent(e)` is exported. Filter a stream by `subagent_run_id` to render subagent activity in its own UI region. Other `isXxx` guards exist in core but only `isSubagentEvent` is promised public.
+Guard helpers `isSubagentEvent(e)` and `isHookErrorEvent(e)` are exported. Filter a stream by `subagent_run_id` to render subagent activity in its own UI region. A steering message (from `session.steer()`) arrives as a `user` event with `subtype:"steering"`. Other `isXxx` guards exist in core but only these two are promised public.
 
 `result` is the terminal event — break the loop when you see it. `tokens_after` in `compaction` is always `0` (no local tokenizer); the real post-compaction input count appears in the next `usage` event.
 
@@ -180,7 +190,7 @@ All extend `SkawldError`, exported from `@skawld/agent-sdk`:
 ```ts
 SkawldError, AuthError, RateLimitError, ContextLengthError,
 PermissionDeniedError, ToolExecutionError, AbortError,
-ProviderError, ConfigError, SkillError
+ProviderError, ConfigError, SkillError, HookError
 ```
 
 - `ConfigError` — bad/missing config (no provider, no model, negative `maxRetries`) or a second concurrent `run()`.
@@ -188,6 +198,7 @@ ProviderError, ConfigError, SkillError
 - `ContextLengthError` — drives compaction; the loop retries after compacting (once per turn).
 - `PermissionDeniedError` / `ToolExecutionError` — surfaced as `error` events / tool results.
 - `AbortError` — from `session.abort()` or an aborted `signal`; yields `result` with `subtype:"aborted"`.
+- `HookError` — a `userPromptSubmit` hook blocked a `steer()` message; rejects that `steer()` promise. Hook throws/timeouts elsewhere surface as `hook_error` events, not thrown errors.
 
 **Aborting:** call `session.abort()` or pass a `RunOptions.signal`. The internal controller is recreated fresh per run, so aborting while idle is a no-op for the next run.
 

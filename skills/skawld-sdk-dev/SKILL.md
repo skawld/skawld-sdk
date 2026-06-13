@@ -1,6 +1,6 @@
 ---
 name: skawld-sdk-dev
-description: Build and run AI agents with the Skawld Agent SDK (@skawld/agent-sdk), a TypeScript/Bun agent harness with tools, sessions, permissions, streaming events, MCP, skills, and subagents. Use this skill whenever the user is writing code against @skawld/agent-sdk, importing Agent/Session/AnthropicProvider/OpenAIResponsesProvider/defaultTools, embedding an agent loop into a Node or Bun app, wiring custom tools, permission callbacks, MCP servers, skills, or subagents, streaming agent events, persisting/resuming sessions, or asks "how do I build an agent with skawld".
+description: Build and run AI agents with the Skawld Agent SDK (@skawld/agent-sdk), a TypeScript/Bun agent harness with tools, sessions, permissions, hooks, streaming events, MCP, skills, and subagents. Use this skill whenever the user is writing code against @skawld/agent-sdk, importing Agent/Session/AnthropicProvider/OpenAIResponsesProvider/defaultTools, embedding an agent loop into a Node or Bun app, wiring custom tools, permission callbacks, hooks (preToolUse/postToolUse/userPromptSubmit/stop/preCompact), the AskUser tool, MCP servers, skills, or subagents, streaming agent events, steering or interrupting a run mid-flight, persisting/resuming sessions, or asks "how do I build an agent with skawld".
 ---
 
 # Skawld Agent SDK Development
@@ -28,7 +28,7 @@ Import only from these four public subpaths (controlled via the `exports` map):
 
 | Subpath | Exports |
 |---|---|
-| `@skawld/agent-sdk` | `Agent`, `Session`, `defaultTools`, `connectMcpServers`, core types, `Event` types + `isSubagentEvent`, error classes, `CompactionStrategy` |
+| `@skawld/agent-sdk` | `Agent`, `Session`, `defaultTools`, `connectMcpServers`, core types, `Event` types + `isSubagentEvent`/`isHookErrorEvent`, `Hooks` types, `AskUserHandler` types, error classes, `CompactionStrategy` |
 | `@skawld/agent-sdk/providers` | `AnthropicProvider`, `OpenAIChatCompletionsProvider`, `OpenAIResponsesProvider`, `BaseProvider` |
 | `@skawld/agent-sdk/tools` | `ToolRegistry`, `defaultTools`, built-in tool classes, MCP tool helpers, task types |
 | `@skawld/agent-sdk/sessions` | `SqliteSessionStore`, `InMemorySessionStore`, `SessionStore` + task persistence types |
@@ -114,6 +114,9 @@ Install with `bun add @skawld/agent-sdk` (Bun recommended; npm/pnpm/yarn also wo
 | Built-in tools: exact params & scope; Task tools | `references/tools-catalog.md` |
 | Data shapes (`Message`, `ContentBlock`, `Usage`, `StopReason`) | `references/api-reference.md` → Common types |
 | Permissions: modes, rules, `canUseTool` callback | `references/building-agents.md` → Permissions |
+| Hooks: `preToolUse`/`postToolUse`/`userPromptSubmit`/`stop`/`preCompact` | `references/building-agents.md` → Hooks |
+| Ask the user mid-run (`AskUser` tool + handler) | `references/building-agents.md` → AskUser |
+| Steer / interrupt an active run | `references/api-reference.md` → Session; `references/recipes.md` #12 |
 | Persist & resume sessions; custom `SessionStore` | `references/building-agents.md` → Sessions; `api-reference.md` → SessionStore |
 | Write a custom `Tool` | `references/building-agents.md` → Custom tools |
 | Connect MCP servers (stdio + HTTP) | `references/building-agents.md` → MCP |
@@ -137,10 +140,10 @@ Install with `bun add @skawld/agent-sdk` (Bun recommended; npm/pnpm/yarn also wo
 ## References
 
 - `references/project-setup.md` — consumer `package.json`/`tsconfig`/ESM, install, env vars, on-disk layout.
-- `references/api-reference.md` — exact signatures: `AgentOptions`, `RunOptions`, the `Event` union, provider constructors + OpenAI-compatible endpoints, data shapes, `SessionStore`, errors, lifecycle.
-- `references/tools-catalog.md` — built-in tool params/scope + the Task tools and persistent task model.
-- `references/building-agents.md` — extending the SDK: permissions, sessions/stores, custom tools, MCP, skills, subagents, custom providers, custom compaction.
-- `references/recipes.md` — copy-paste patterns: streaming UI, permission callback, rules, resume, abort, images/thinking, MCP, REPL, offline testing.
+- `references/api-reference.md` — exact signatures: `AgentOptions` (incl. `hooks`/`askUser`), `RunOptions`, `Session` (incl. `steer`/`interrupt`), the `Event` union, provider constructors + OpenAI-compatible endpoints, data shapes, `SessionStore`, errors, lifecycle.
+- `references/tools-catalog.md` — built-in tool params/scope, the Task tools and persistent task model, plus the conditionally-registered `AskUser`/`Skill`/`Subagent` tools.
+- `references/building-agents.md` — extending the SDK: permissions, hooks, AskUser, sessions/stores, custom tools, MCP, skills, subagents, custom providers, custom compaction.
+- `references/recipes.md` — copy-paste patterns: streaming UI, permission callback, rules, resume, abort, steer/interrupt, hooks + AskUser, images/thinking, MCP, REPL, offline testing.
 - `assets/starter-app/` — a complete runnable terminal-agent scaffold (package.json + tsconfig + src) to copy and adapt.
 
 When a detail is not covered here, the authoritative sources are the published docs at **https://skawld.com/docs** (see the per-concept link table above), the SDK's own `spec_docs/` (numbered `00-` through `12-`), and `src/sdk.ts` (the curated public export surface). Note: the config-file *loader* (`src/config/`) is a stub in v1 — configure agents in code via `AgentOptions` (the docs' Configuration page covers those knobs).
