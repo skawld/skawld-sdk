@@ -94,11 +94,19 @@ export interface AgentOptions {
    */
   cacheTtl?: "5m" | "1h";
   /**
-   * Per-project config directory. Skills are loaded from
-   * `<configDir>/skills/<name>/SKILL.md`. Defaults to `".skawld"` resolved
-   * against `cwd`. Pass an absolute path to override.
+   * Per-project config directory (or directories). Skills are loaded from
+   * `<configDir>/skills/<name>/SKILL.md` and subagents from `<configDir>/agents/`.
+   * Defaults to `".skawld"` resolved against `cwd`. Pass an absolute path to
+   * override.
+   *
+   * Accepts a `string[]` to load from several config directories at once (e.g.
+   * domain-scoped catalogs). Directories are searched in array order with
+   * first-directory-wins precedence: when the same skill/agent name appears in
+   * more than one directory, the earlier directory's copy is kept and later
+   * duplicates are reported as skipped name-collisions. An empty array falls
+   * back to the `".skawld"` default. Missing directories are skipped silently.
    */
-  configDir?: string;
+  configDir?: string | string[];
   /**
    * Typed, programmatic interception points around tool calls, prompts, the stop
    * boundary, and compaction. Agent-level, like `canUseTool`. See
@@ -296,16 +304,21 @@ export class Agent {
       sessions.set(id, new WeakRef(si));
       sessionCleanup.register(si, id);
     };
-    const configDir = opts.configDir
-      ? path.resolve(cwd, opts.configDir)
-      : path.resolve(cwd, ".skawld");
+    // Normalize configDir to a resolved list. A plain string yields a single
+    // entry; a string[] yields one resolved entry per directory (searched in
+    // array order). Empty/whitespace entries are dropped, and an empty result
+    // falls back to the ".skawld" default.
+    const configDirs = (Array.isArray(opts.configDir) ? opts.configDir : [opts.configDir])
+      .filter((d): d is string => typeof d === "string" && d.length > 0)
+      .map((d) => path.resolve(cwd, d));
+    if (configDirs.length === 0) configDirs.push(path.resolve(cwd, ".skawld"));
     let _skillsConnect: Promise<void> | undefined;
     const connectSkills = (): Promise<void> => {
       if (!_skillsConnect) {
         _skillsConnect = (async () => {
           const builtinNames = new Set(tools.list().map(t => t.name));
           const { skills: loaded } = await loadSkillsFromDir({
-            configDir,
+            configDir: configDirs,
             builtinToolNames: builtinNames,
           });
           for (const s of loaded) skills.set(s.name, s);
@@ -354,7 +367,7 @@ export class Agent {
     const connectSubagents = (): Promise<void> => {
       if (!_subagentsConnect) {
         _subagentsConnect = (async () => {
-          const { agents: diskAgents } = await loadAgentsFromDir({ configDir });
+          const { agents: diskAgents } = await loadAgentsFromDir({ configDir: configDirs });
           internal.subagentRegistry = buildAgentRegistry(diskAgents);
           const subagentTool = new SubagentTool({
             registry: internal.subagentRegistry,
