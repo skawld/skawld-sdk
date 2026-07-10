@@ -1,4 +1,7 @@
-/** Subagent loader: walks `<configDir>/agents/`, parses *.md frontmatter, returns AgentDefinitions. */
+/**
+ * Subagent loader: walks `<configDir>/agents/`, parses *.md frontmatter, returns AgentDefinitions.
+ * `configDir` may be a single path or an array of paths walked in first-dir-wins order.
+ */
 
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -14,73 +17,84 @@ const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/i;
 
 export interface LoadAgentsOptions {
-  /** Absolute path to the config directory containing an `agents/` subfolder. */
-  configDir: string;
+  /**
+   * Absolute path (or paths) to the config directory containing an `agents/`
+   * subfolder. When several directories are given they are walked in array
+   * order with first-directory-wins precedence: the first directory to define
+   * a given agent name keeps it, and later duplicates are reported in `skipped`
+   * with reason `name-collision`.
+   */
+  configDir: string | string[];
 }
 
 export async function loadAgentsFromDir(
   opts: LoadAgentsOptions,
 ): Promise<LoadAgentsResult> {
-  const agentsRoot = path.join(opts.configDir, "agents");
-  let entries;
-  try {
-    entries = await readdir(agentsRoot, { withFileTypes: true });
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { agents: [], skipped: [] };
-    return {
-      agents: [],
-      skipped: [{ filePath: agentsRoot, reason: "io-error", detail: (err as Error).message }],
-    };
-  }
+  const configDirs = Array.isArray(opts.configDir) ? opts.configDir : [opts.configDir];
 
   const agents: AgentDefinition[] = [];
   const skipped: SkippedAgent[] = [];
+  // Shared across directories so precedence is first-dir-wins.
   const seenNames = new Set<string>();
 
-  for (const ent of entries) {
-    const filePath = path.join(agentsRoot, ent.name);
-    if (ent.isSymbolicLink()) {
-      skipped.push({ filePath, reason: "io-error", detail: "symlinks are not followed" });
-      continue;
-    }
-    if (!ent.isFile()) continue;
-    if (!ent.name.toLowerCase().endsWith(".md")) continue;
-
-    let raw: string;
+  for (const configDir of configDirs) {
+    const agentsRoot = path.join(configDir, "agents");
+    let entries;
     try {
-      raw = await readFile(filePath, "utf8");
+      entries = await readdir(agentsRoot, { withFileTypes: true });
     } catch (err) {
-      skipped.push({ filePath, reason: "io-error", detail: (err as Error).message });
+      const code = (err as NodeJS.ErrnoException).code;
+      // Missing agents/ directory is not an error — skip it (a single absent
+      // dir behaves exactly as before this loader accepted multiple dirs).
+      if (code === "ENOENT") continue;
+      skipped.push({ filePath: agentsRoot, reason: "io-error", detail: (err as Error).message });
       continue;
     }
 
-    const fileBase = ent.name.replace(/\.md$/i, "");
-    const parsed = parseFrontmatter(raw, fileBase);
-    if (!parsed.ok) {
-      skipped.push({ filePath, reason: parsed.reason, detail: parsed.error });
-      continue;
-    }
-    const { frontmatter, body } = parsed.value;
+    for (const ent of entries) {
+      const filePath = path.join(agentsRoot, ent.name);
+      if (ent.isSymbolicLink()) {
+        skipped.push({ filePath, reason: "io-error", detail: "symlinks are not followed" });
+        continue;
+      }
+      if (!ent.isFile()) continue;
+      if (!ent.name.toLowerCase().endsWith(".md")) continue;
 
-    const key = frontmatter.name.toLowerCase();
-    if (seenNames.has(key)) {
-      skipped.push({
+      let raw: string;
+      try {
+        raw = await readFile(filePath, "utf8");
+      } catch (err) {
+        skipped.push({ filePath, reason: "io-error", detail: (err as Error).message });
+        continue;
+      }
+
+      const fileBase = ent.name.replace(/\.md$/i, "");
+      const parsed = parseFrontmatter(raw, fileBase);
+      if (!parsed.ok) {
+        skipped.push({ filePath, reason: parsed.reason, detail: parsed.error });
+        continue;
+      }
+      const { frontmatter, body } = parsed.value;
+
+      const key = frontmatter.name.toLowerCase();
+      if (seenNames.has(key)) {
+        skipped.push({
+          filePath,
+          reason: "name-collision",
+          detail: `agent name '${frontmatter.name}' already loaded`,
+        });
+        continue;
+      }
+      seenNames.add(key);
+
+      agents.push({
+        name: frontmatter.name,
         filePath,
-        reason: "name-collision",
-        detail: `agent name '${frontmatter.name}' already loaded`,
+        source: "disk",
+        frontmatter,
+        body,
       });
-      continue;
     }
-    seenNames.add(key);
-
-    agents.push({
-      name: frontmatter.name,
-      filePath,
-      source: "disk",
-      frontmatter,
-      body,
-    });
   }
 
   agents.sort((a, b) => a.name.localeCompare(b.name));

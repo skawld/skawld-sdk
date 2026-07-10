@@ -1,4 +1,7 @@
-/** Skill loader: walks `<configDir>/skills/`, parses SKILL.md frontmatter, returns Skills. */
+/**
+ * Skill loader: walks `<configDir>/skills/`, parses SKILL.md frontmatter, returns Skills.
+ * `configDir` may be a single path or an array of paths walked in first-dir-wins order.
+ */
 
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -11,8 +14,14 @@ const ARG_NAME_RE = /^[a-z_][a-z0-9_]*$/i;
 const TOOL_NAME_RE = /^[^\s]+$/;
 
 export interface LoadSkillsOptions {
-  /** Absolute path to the config directory containing a `skills/` subfolder. */
-  configDir: string;
+  /**
+   * Absolute path (or paths) to the config directory containing a `skills/`
+   * subfolder. When several directories are given they are walked in array
+   * order with first-directory-wins precedence: the first directory to define
+   * a given skill name keeps it, and later duplicates are reported in `skipped`
+   * with reason `name-collision-skill`.
+   */
+  configDir: string | string[];
   /** Names of currently registered builtin tools — used to detect skill/tool name collisions. */
   builtinToolNames: Set<string>;
 }
@@ -23,73 +32,79 @@ export interface LoadSkillsResult {
 }
 
 export async function loadSkillsFromDir(opts: LoadSkillsOptions): Promise<LoadSkillsResult> {
-  const skillsRoot = path.join(opts.configDir, "skills");
-  let entries;
-  try {
-    entries = await readdir(skillsRoot, { withFileTypes: true });
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { skills: [], skipped: [] };
-    return {
-      skills: [],
-      skipped: [{ dir: skillsRoot, reason: "io-error", detail: (err as Error).message }],
-    };
-  }
+  const configDirs = Array.isArray(opts.configDir) ? opts.configDir : [opts.configDir];
 
   const skills: Skill[] = [];
   const skipped: SkippedSkill[] = [];
+  // Collision state is shared across directories so precedence is first-dir-wins:
+  // the first directory to define a name keeps it; later duplicates are skipped.
   const seenNames = new Set<string>();
   // Skill names are normalized to lowercase, so compare against builtins the same way.
   const builtinNamesLower = new Set([...opts.builtinToolNames].map((n) => n.toLowerCase()));
 
-  for (const ent of entries) {
-    const entryDir = path.join(skillsRoot, ent.name);
-    if (ent.isSymbolicLink()) {
-      skipped.push({ dir: entryDir, reason: "io-error", detail: "symlinks are not followed" });
-      continue;
-    }
-    if (!ent.isDirectory()) continue;
-
-    const skillMdPath = path.join(entryDir, "SKILL.md");
-    let raw: string;
+  for (const configDir of configDirs) {
+    const skillsRoot = path.join(configDir, "skills");
+    let entries;
     try {
-      raw = await readFile(skillMdPath, "utf8");
+      entries = await readdir(skillsRoot, { withFileTypes: true });
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") {
-        skipped.push({ dir: entryDir, reason: "missing-skill-md", detail: "SKILL.md not found" });
-      } else {
-        skipped.push({ dir: entryDir, reason: "io-error", detail: (err as Error).message });
+      // Missing skills/ directory is not an error — skip it (a single absent
+      // dir behaves exactly as before this loader accepted multiple dirs).
+      if (code === "ENOENT") continue;
+      skipped.push({ dir: skillsRoot, reason: "io-error", detail: (err as Error).message });
+      continue;
+    }
+
+    for (const ent of entries) {
+      const entryDir = path.join(skillsRoot, ent.name);
+      if (ent.isSymbolicLink()) {
+        skipped.push({ dir: entryDir, reason: "io-error", detail: "symlinks are not followed" });
+        continue;
       }
-      continue;
-    }
+      if (!ent.isDirectory()) continue;
 
-    const parsed = parseFrontmatter(raw, ent.name);
-    if (!parsed.ok) {
-      skipped.push({ dir: entryDir, reason: "invalid-frontmatter", detail: parsed.error });
-      continue;
-    }
-    const { frontmatter, body } = parsed.value;
+      const skillMdPath = path.join(entryDir, "SKILL.md");
+      let raw: string;
+      try {
+        raw = await readFile(skillMdPath, "utf8");
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") {
+          skipped.push({ dir: entryDir, reason: "missing-skill-md", detail: "SKILL.md not found" });
+        } else {
+          skipped.push({ dir: entryDir, reason: "io-error", detail: (err as Error).message });
+        }
+        continue;
+      }
 
-    if (builtinNamesLower.has(frontmatter.name)) {
-      skipped.push({
-        dir: entryDir,
-        reason: "name-collision-tool",
-        detail: `skill name '${frontmatter.name}' collides with builtin tool`,
-      });
-      continue;
-    }
-    if (seenNames.has(frontmatter.name)) {
-      skipped.push({
-        dir: entryDir,
-        reason: "name-collision-skill",
-        detail: `skill name '${frontmatter.name}' already loaded`,
-      });
-      continue;
-    }
-    seenNames.add(frontmatter.name);
+      const parsed = parseFrontmatter(raw, ent.name);
+      if (!parsed.ok) {
+        skipped.push({ dir: entryDir, reason: "invalid-frontmatter", detail: parsed.error });
+        continue;
+      }
+      const { frontmatter, body } = parsed.value;
 
-    skills.push({ name: frontmatter.name, dir: entryDir, frontmatter, body });
+      if (builtinNamesLower.has(frontmatter.name)) {
+        skipped.push({
+          dir: entryDir,
+          reason: "name-collision-tool",
+          detail: `skill name '${frontmatter.name}' collides with builtin tool`,
+        });
+        continue;
+      }
+      if (seenNames.has(frontmatter.name)) {
+        skipped.push({
+          dir: entryDir,
+          reason: "name-collision-skill",
+          detail: `skill name '${frontmatter.name}' already loaded`,
+        });
+        continue;
+      }
+      seenNames.add(frontmatter.name);
+
+      skills.push({ name: frontmatter.name, dir: entryDir, frontmatter, body });
+    }
   }
 
   skills.sort((a, b) => a.name.localeCompare(b.name));
