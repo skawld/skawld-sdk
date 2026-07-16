@@ -24,6 +24,7 @@ import { AbortError } from "../core/errors.js";
 import type { OpenAIChatProviderOptions } from "./openai-chat.js";
 import { mapOpenAIError } from "./openai-errors.js";
 import { withRetryableStream } from "./retry.js";
+import { tolerantSseFetch } from "./sse-tolerance.js";
 
 export interface OpenAIResponsesProviderOptions extends OpenAIChatProviderOptions {
   /** Reasoning effort hint or config. */
@@ -603,6 +604,9 @@ export class OpenAIResponsesProvider extends BaseProvider {
     if (opts.apiKey !== undefined) init.apiKey = opts.apiKey;
     if (opts.baseURL !== undefined) init.baseURL = opts.baseURL;
     if (opts.defaultHeaders !== undefined) init.defaultHeaders = opts.defaultHeaders;
+    if (opts.tolerantStreaming !== false) {
+      init.fetch = tolerantSseFetch({ onMalformedEvent: opts.onMalformedEvent });
+    }
     this.client = new OpenAI(init) as unknown as OpenAIWireClient;
     if (opts.reasoning) this.reasoning = opts.reasoning;
     if (opts.store !== undefined) this.store = opts.store;
