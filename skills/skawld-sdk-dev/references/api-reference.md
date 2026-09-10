@@ -28,7 +28,7 @@ interface AgentOptions {
   includePartialMessages?: boolean;       // emit partial_assistant token deltas; default false
   maxTurns?: number;                      // hard cap on turns/run; default Infinity → TurnLimitError result on hit
   cacheTtl?: "5m" | "1h";                 // Anthropic prompt-cache TTL hint; default "5m"
-  configDir?: string;                     // dir for skills/agents; default ".skawld" resolved vs cwd
+  configDir?: string | string[];          // dir(s) for skills/agents; default ".skawld" vs cwd; array = load from many, first-dir-wins
   hooks?: Hooks;                          // typed interception points; see building-agents.md → Hooks
   askUser?: AskUserHandler;               // enables the AskUser tool; see building-agents.md → AskUser
 }

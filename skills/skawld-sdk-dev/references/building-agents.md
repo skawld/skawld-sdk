@@ -233,7 +233,7 @@ Config shape mirrors the Claude Agent SDK (`McpStdioServerConfig` | `McpHttpServ
 
 📖 Docs: https://skawld.com/docs/skills
 
-Skills are markdown prompt-extensions auto-loaded from `<configDir>/skills/<name>/SKILL.md` (configDir defaults to `.skawld`). When skills exist, a `Skill` tool is registered so the model can invoke them. Informational skills (no `allowed_tools`, no `model`) are auto-allowed.
+Skills are markdown prompt-extensions auto-loaded from `<configDir>/skills/<name>/SKILL.md` (configDir defaults to `.skawld`). When skills exist, a `Skill` tool is registered so the model can invoke them. Informational skills (no `allowed_tools`, no `model`) are auto-allowed. `configDir` also accepts a `string[]` to merge skills (and agents) from several directories; directories are searched in array order with first-directory-wins precedence on name collisions.
 
 `SKILL.md` frontmatter (YAML keys are snake_case):
 

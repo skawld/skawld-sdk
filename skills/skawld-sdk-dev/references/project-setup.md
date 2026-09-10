@@ -74,7 +74,7 @@ Providers read these when constructed with no explicit `apiKey`. You can also pa
 
 ## On-disk layout the SDK reads
 
-Resolved against `cwd`; the config root defaults to `.skawld` (override with `AgentOptions.configDir`).
+Resolved against `cwd`; the config root defaults to `.skawld` (override with `AgentOptions.configDir`, which also accepts a `string[]` to load from several config roots, first-dir-wins).
 
 ```
 your-app/
