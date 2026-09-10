@@ -42,6 +42,7 @@ import {
 } from "./base.js";
 import { readRetryAfter, readStatus } from "./http-error-fields.js";
 import { withRetryableStream } from "./retry.js";
+import { tolerantSseFetch, type MalformedEventHandler } from "./sse-tolerance.js";
 
 export interface AnthropicProviderOptions {
   apiKey?: string;
@@ -51,6 +52,13 @@ export interface AnthropicProviderOptions {
   thinking?: ThinkingConfig;
   /** Default effort hint; per-run RunOptions.effort overrides it. */
   effort?: EffortLevel;
+  /**
+   * Repair/drop malformed SSE frames (mis-wrapped keepalives, raw control
+   * chars) instead of letting one bad frame abort the run. Default: true.
+   */
+  tolerantStreaming?: boolean;
+  /** Called with the raw text of each dropped SSE event; must not throw. */
+  onMalformedEvent?: MalformedEventHandler;
 }
 
 const KNOWN_ANTHROPIC_CONTEXT: Record<string, number> = {
@@ -405,6 +413,9 @@ export class AnthropicProvider extends BaseProvider {
     if (opts.apiKey !== undefined) init.apiKey = opts.apiKey;
     if (opts.baseURL !== undefined) init.baseURL = opts.baseURL;
     if (opts.defaultHeaders !== undefined) init.defaultHeaders = opts.defaultHeaders;
+    if (opts.tolerantStreaming !== false) {
+      init.fetch = tolerantSseFetch({ onMalformedEvent: opts.onMalformedEvent });
+    }
     this.client = new Anthropic(init) as unknown as AnthropicWireClient;
     if (opts.thinking !== undefined) this.thinking = opts.thinking;
     if (opts.effort !== undefined) this.effort = opts.effort;

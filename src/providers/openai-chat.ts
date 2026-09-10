@@ -26,6 +26,7 @@ import {
 import { AbortError } from "../core/errors.js";
 import { mapOpenAIError } from "./openai-errors.js";
 import { withRetryableStream } from "./retry.js";
+import { tolerantSseFetch, type MalformedEventHandler } from "./sse-tolerance.js";
 
 export interface OpenAIChatProviderOptions {
   apiKey?: string;
@@ -33,6 +34,13 @@ export interface OpenAIChatProviderOptions {
   defaultHeaders?: Record<string, string>;
   /** Override context window lookup, for compatible endpoints. */
   contextWindowOverride?: (model: ModelId) => number | undefined;
+  /**
+   * Repair/drop malformed SSE frames (mis-wrapped keepalives, raw control
+   * chars) instead of letting one bad frame abort the run. Default: true.
+   */
+  tolerantStreaming?: boolean;
+  /** Called with the raw text of each dropped SSE event; must not throw. */
+  onMalformedEvent?: MalformedEventHandler;
 }
 
 const KNOWN_OPENAI_CONTEXT: Record<string, number> = {
@@ -413,6 +421,9 @@ export class OpenAIChatCompletionsProvider extends BaseProvider {
     if (opts.apiKey !== undefined) init.apiKey = opts.apiKey;
     if (opts.baseURL !== undefined) init.baseURL = opts.baseURL;
     if (opts.defaultHeaders !== undefined) init.defaultHeaders = opts.defaultHeaders;
+    if (opts.tolerantStreaming !== false) {
+      init.fetch = tolerantSseFetch({ onMalformedEvent: opts.onMalformedEvent });
+    }
     this.client = new OpenAI(init) as unknown as OpenAIWireClient;
     if (opts.contextWindowOverride) {
       this.contextWindowOverride = opts.contextWindowOverride;
