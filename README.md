@@ -74,6 +74,43 @@ On startup it prompts for a working directory (defaults to the current one), the
 
 ---
 
+## Web research with Parallel Search MCP
+
+[`examples/parallel-search-agent.ts`](./examples/parallel-search-agent.ts) connects to
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp) over
+Streamable HTTP, using `AgentOptions.mcpServers`. It exposes `web_search` and
+`web_fetch` and asks the model to cite source URLs. Parallel's anonymous tier is
+free for exploration and light use, with rate limits and no Parallel API key.
+The example uses Anthropic for inference, which requires its own key and billing.
+
+From a checkout of this repository:
+
+```sh
+bun install --frozen-lockfile
+export ANTHROPIC_API_KEY=sk-ant-...
+bun run examples/parallel-search-agent.ts "What is the Model Context Protocol? Cite official sources."
+```
+
+The example uses an in-memory session store, allows only the two named MCP tools,
+and exposes no local filesystem or shell tools. It connects on `agent.session()`
+and closes the connection in `finally`, including when a run fails. Running this
+example is opt-in; it doesn't change SDK defaults or the existing examples.
+To use the server in your own agent, add the following entry to `mcpServers`:
+
+```ts
+parallel: {
+  type: "http",
+  url: "https://search.parallel.ai/mcp",
+  headers: { "User-Agent": "your-app-name/your-app-version" },
+}
+```
+
+Use your application's actual name and version for the User-Agent. No
+`Authorization` header is needed for anonymous access. The example sends
+`skawld-sdk/parallel-search-example`. MCP calls retain the SDK's default timeout.
+
+---
+
 ## Providers
 
 | Provider class | Subpath | Environment variable |
